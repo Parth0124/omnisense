@@ -1,0 +1,210 @@
+# =============================================================================
+# OmniSense - local development stack.
+#
+# LOCAL ONLY. This file is not a deployment artifact; production topology lives
+# under infra/. Every credential here is a throwaway development default.
+#
+#   make up      start everything
+#   make down    stop everything
+#   make nuke    stop and delete volumes
+#
+# Application containers (api, worker, frontend) are behind the `apps` profile
+# so the default `make up` only starts datastores and you can run the app from
+# your host with hot reload:
+#   docker compose --profile apps up -d
+# =============================================================================
+
+name: omnisense
+
+services:
+  # ------------------------------------------------------------- PostgreSQL --
+  postgres:
+    image: postgres:16-alpine
+    container_name: omnisense-postgres
+    environment:
+      POSTGRES_DB: omnisense
+      POSTGRES_USER: omnisense
+      POSTGRES_PASSWORD: omnisense
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./docker/local/postgres:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U omnisense -d omnisense"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ------------------------------------------------------------------ Redis --
+  redis:
+    image: redis:7-alpine
+    container_name: omnisense-redis
+    command: redis-server --appendonly yes --maxmemory 512mb --maxmemory-policy allkeys-lru
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+  # ------------------------------------------------------------------ Neo4j --
+  neo4j:
+    image: neo4j:5-community
+    container_name: omnisense-neo4j
+    environment:
+      NEO4J_AUTH: neo4j/omnisense
+      NEO4J_PLUGINS: '["apoc"]'
+      NEO4J_dbms_security_procedures_unrestricted: apoc.*
+      NEO4J_server_memory_heap_max__size: 1G
+    ports:
+      - "7474:7474"   # HTTP browser
+      - "7687:7687"   # Bolt
+    volumes:
+      - neo4j_data:/data
+      - neo4j_logs:/logs
+      - ./docker/local/neo4j:/var/lib/neo4j/import:ro
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:7474 || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+
+  # ----------------------------------------------------------------- Qdrant --
+  qdrant:
+    image: qdrant/qdrant:latest
+    container_name: omnisense-qdrant
+    ports:
+      - "6333:6333"   # REST
+      - "6334:6334"   # gRPC
+    volumes:
+      - qdrant_data:/qdrant/storage
+    healthcheck:
+      test: ["CMD-SHELL", "bash -c ':> /dev/tcp/127.0.0.1/6333' || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+
+  # ------------------------------------------------------------- OpenSearch --
+  opensearch:
+    image: opensearchproject/opensearch:2
+    container_name: omnisense-opensearch
+    environment:
+      discovery.type: single-node
+      bootstrap.memory_lock: "true"
+      OPENSEARCH_JAVA_OPTS: "-Xms1g -Xmx1g"
+      DISABLE_SECURITY_PLUGIN: "true"      # local only
+      DISABLE_INSTALL_DEMO_CONFIG: "true"
+    ulimits:
+      memlock: { soft: -1, hard: -1 }
+      nofile: { soft: 65536, hard: 65536 }
+    ports:
+      - "9200:9200"
+    volumes:
+      - opensearch_data:/usr/share/opensearch/data
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fs http://localhost:9200/_cluster/health || exit 1"]
+      interval: 20s
+      timeout: 10s
+      retries: 10
+
+  # --------------------------------------------- Redpanda (Kafka-compatible) --
+  redpanda:
+    image: redpandadata/redpanda:latest
+    container_name: omnisense-redpanda
+    command:
+      - redpanda start
+      - --smp 1
+      - --overprovisioned
+      - --node-id 0
+      - --check=false
+      - --kafka-addr internal://0.0.0.0:9092,external://0.0.0.0:19092
+      - --advertise-kafka-addr internal://redpanda:9092,external://localhost:19092
+    ports:
+      - "19092:19092"   # Kafka API from the host
+      - "9644:9644"     # Admin API
+    volumes:
+      - redpanda_data:/var/lib/redpanda/data
+    healthcheck:
+      test: ["CMD-SHELL", "rpk cluster health | grep -q 'Healthy:.*true'"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+
+  redpanda-console:
+    image: redpandadata/console:latest
+    container_name: omnisense-redpanda-console
+    environment:
+      KAFKA_BROKERS: redpanda:9092
+    ports:
+      - "8080:8080"
+    depends_on:
+      redpanda:
+        condition: service_started
+    profiles: ["tools"]
+
+  # ------------------------------------------------- Application containers --
+  api:
+    build:
+      context: .
+      dockerfile: docker/backend.Dockerfile
+    container_name: omnisense-api
+    env_file: [.env]
+    environment:
+      POSTGRES_HOST: postgres
+      DATABASE_URL: postgresql+asyncpg://omnisense:omnisense@postgres:5432/omnisense
+      REDIS_URL: redis://redis:6379/0
+      NEO4J_URI: bolt://neo4j:7687
+      QDRANT_URL: http://qdrant:6333
+      OPENSEARCH_URL: http://opensearch:9200
+      KAFKA_BOOTSTRAP_SERVERS: redpanda:9092
+    ports:
+      - "8000:8000"
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis: { condition: service_healthy }
+      neo4j: { condition: service_healthy }
+      qdrant: { condition: service_started }
+    profiles: ["apps"]
+
+  worker:
+    build:
+      context: .
+      dockerfile: docker/worker.Dockerfile
+    container_name: omnisense-worker
+    env_file: [.env]
+    environment:
+      DATABASE_URL: postgresql+asyncpg://omnisense:omnisense@postgres:5432/omnisense
+      REDIS_URL: redis://redis:6379/0
+      NEO4J_URI: bolt://neo4j:7687
+      QDRANT_URL: http://qdrant:6333
+      OPENSEARCH_URL: http://opensearch:9200
+      KAFKA_BOOTSTRAP_SERVERS: redpanda:9092
+    depends_on:
+      postgres: { condition: service_healthy }
+      redpanda: { condition: service_started }
+    profiles: ["apps"]
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: ../docker/frontend.Dockerfile
+    container_name: omnisense-frontend
+    environment:
+      NEXT_PUBLIC_API_BASE_URL: http://localhost:8000
+    ports:
+      - "3000:3000"
+    depends_on: [api]
+    profiles: ["apps"]
+
+volumes:
+  postgres_data:
+  redis_data:
+  neo4j_data:
+  neo4j_logs:
+  qdrant_data:
+  opensearch_data:
+  redpanda_data:

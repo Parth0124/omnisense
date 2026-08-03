@@ -1,0 +1,78 @@
+# =============================================================================
+# OmniSense runtime dependencies
+#   pip install -r requirements.txt
+# Versions are pinned loosely at the minor level; run `make lock` to freeze.
+# =============================================================================
+
+# ------------------------------------------------------------------- Web / API
+fastapi>=0.115,<1.0
+uvicorn[standard]>=0.32,<1.0
+pydantic>=2.9,<3.0
+pydantic-settings>=2.6,<3.0
+python-multipart>=0.0.12
+sse-starlette>=2.1
+
+# ---------------------------------------------------------------- PostgreSQL
+sqlalchemy[asyncio]>=2.0,<3.0
+alembic>=1.14,<2.0
+asyncpg>=0.30,<1.0
+psycopg[binary]>=3.2,<4.0
+
+# --------------------------------------------------------------- Other stores
+redis>=5.2,<6.0
+neo4j>=5.26,<6.0
+qdrant-client>=1.12,<2.0
+grpcio>=1.41                # imported DIRECTLY by backend/db/qdrant.py for
+                            # RpcError, not merely pulled in transitively; pinned
+                            # here so the import cannot break if qdrant-client
+                            # ever moves grpc behind an extra
+opensearch-py[async]>=2.8,<3.0   # the [async] extra pulls aiohttp; without it
+                                 # `from opensearchpy import AsyncOpenSearch` ImportErrors
+boto3>=1.35,<2.0            # Cloudflare R2 via the S3-compatible API
+
+# ------------------------------------------------------------------- Messaging
+aiokafka>=0.12,<1.0
+
+# ---------------------------------------------------------------------- Agents
+langgraph>=0.2,<1.0
+langgraph-checkpoint-postgres>=2.0,<3.0
+langchain-core>=0.3,<1.0
+langchain-anthropic>=0.3,<1.0
+anthropic>=0.40,<1.0
+mcp>=1.1,<2.0
+
+# ----------------------------------------------------------- Signal enrichment
+httpx>=0.27,<1.0
+tenacity>=9.0,<10.0
+beautifulsoup4>=4.12,<5.0
+lxml>=5.3,<6.0
+trafilatura>=1.12,<2.0
+langdetect>=1.0.9
+python-dateutil>=2.9
+feedparser>=6.0,<7.0
+rapidfuzz>=3.10,<4.0
+
+# -------------------------------------------------------------------- Analysis
+numpy>=2.1,<3.0
+pandas>=2.2,<3.0
+scikit-learn>=1.5,<2.0
+statsmodels>=0.14,<1.0
+
+# --------------------------------------------------------------- Observability
+structlog>=24.4,<25.0
+opentelemetry-api>=1.28,<2.0
+opentelemetry-sdk>=1.28,<2.0
+opentelemetry-instrumentation-fastapi>=0.49b0
+opentelemetry-exporter-otlp>=1.28,<2.0
+prometheus-client>=0.21,<1.0
+
+# ------------------------------------------------------------------- Security
+cryptography>=43.0
+passlib[bcrypt]>=1.7.4
+pyjwt>=2.10,<3.0
+
+# ---------------------------------------------------------------------- Utils
+orjson>=3.10,<4.0
+python-slugify>=8.0,<9.0
+pyyaml>=6.0,<7.0
+typer>=0.15,<1.0

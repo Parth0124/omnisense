@@ -1,0 +1,66 @@
+# ---------------------------------------------------------------- Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+dist/
+*.egg-info/
+.eggs/
+.venv/
+venv/
+env/
+.python-version
+
+# ------------------------------------------------------------------ Tooling
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+.hypothesis/
+
+# ------------------------------------------------------------------- Node
+node_modules/
+.next/
+out/
+.turbo/
+*.tsbuildinfo
+.eslintcache
+npm-debug.log*
+
+# ------------------------------------------------------------- Environment
+.env
+.env.*
+!.env.example
+!frontend/.env.local.example
+*.pem
+*.key
+secrets/
+
+# ------------------------------------------------------------------ Local data
+data/
+.volumes/
+*.db
+*.sqlite3
+dumps/
+
+# ------------------------------------------------------------------- Editors
+.vscode/
+.idea/
+*.swp
+
+# --------------------------------------------------------------------- OS
+.DS_Store
+Thumbs.db
+
+# --------------------------------------------------------------- Artifacts
+logs/
+*.log
+.langsmith/
+tmp/
+scratch/
+/docs
