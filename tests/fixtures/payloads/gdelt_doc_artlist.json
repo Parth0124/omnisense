@@ -1,0 +1,44 @@
+{
+  "articles": [
+    {
+      "url": "https://www.example-news.com/2026/07/28/observability-bill?utm_source=gdelt&fbclid=IwAR9",
+      "url_mobile": "https://m.example-news.com/2026/07/28/observability-bill",
+      "title": "Our observability bill tripled, so we moved forty services off it",
+      "seendate": "20260728T140000Z",
+      "socialimage": "https://cdn.example-news.com/2026/07/observability.jpg",
+      "domain": "example-news.com",
+      "language": "English",
+      "sourcecountry": "United States"
+    },
+    {
+      "url": "https://wire.example.org/freight/q2-2026",
+      "url_mobile": "",
+      "title": "Port authority publishes quarterly freight volumes",
+      "seendate": "20260728T141500Z",
+      "socialimage": "",
+      "domain": "wire.example.org",
+      "language": "English",
+      "sourcecountry": "United Kingdom"
+    },
+    {
+      "url": "https://noticias.example.es/energia/interconexion",
+      "url_mobile": "",
+      "title": "El operador de red retrasa la decision sobre la interconexion",
+      "seendate": "20260728T143000Z",
+      "socialimage": "https://img.example.es/energia/interconexion.jpg",
+      "domain": "noticias.example.es",
+      "language": "Spanish",
+      "sourcecountry": "Spain"
+    },
+    {
+      "url": "https://tradedaily.example.net/steel/2026-07-28",
+      "url_mobile": "",
+      "title": "",
+      "seendate": "20260728T144500Z",
+      "socialimage": "",
+      "domain": "tradedaily.example.net",
+      "language": "English",
+      "sourcecountry": "Singapore"
+    }
+  ]
+}

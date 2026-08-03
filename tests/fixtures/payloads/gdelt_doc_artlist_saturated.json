@@ -1,0 +1,34 @@
+{
+  "articles": [
+    {
+      "url": "https://a.example.com/batch/one",
+      "url_mobile": "",
+      "title": "Central bank holds rates for a fourth meeting",
+      "seendate": "20260728T140000Z",
+      "socialimage": "",
+      "domain": "a.example.com",
+      "language": "English",
+      "sourcecountry": "United States"
+    },
+    {
+      "url": "https://b.example.com/batch/two",
+      "url_mobile": "",
+      "title": "Central bank holds rates, analysts split on the next move",
+      "seendate": "20260728T140000Z",
+      "socialimage": "",
+      "domain": "b.example.com",
+      "language": "English",
+      "sourcecountry": "Canada"
+    },
+    {
+      "url": "https://c.example.com/batch/three",
+      "url_mobile": "",
+      "title": "Rates unchanged as inflation prints in line",
+      "seendate": "20260728T140000Z",
+      "socialimage": "",
+      "domain": "c.example.com",
+      "language": "English",
+      "sourcecountry": "Ireland"
+    }
+  ]
+}

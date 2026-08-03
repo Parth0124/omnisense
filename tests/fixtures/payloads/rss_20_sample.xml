@@ -1,0 +1,72 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0"
+     xmlns:content="http://purl.org/rss/1.0/modules/content/"
+     xmlns:dc="http://purl.org/dc/elements/1.1/"
+     xmlns:atom="http://www.w3.org/2005/Atom">
+  <channel>
+    <title>Ledger Observability Weekly</title>
+    <link>https://news.example.com/</link>
+    <atom:link href="https://news.example.com/feed.xml" rel="self" type="application/rss+xml"/>
+    <description>Infrastructure cost reporting for people who pay the bill.</description>
+    <language>en-gb</language>
+    <lastBuildDate>Fri, 31 Jul 2026 09:15:00 GMT</lastBuildDate>
+    <ttl>15</ttl>
+
+    <!-- Newest first, which is the convention the connector has to undo. -->
+    <item>
+      <title>Grafana Cloud renewal quotes triple for mid-size estates</title>
+      <link>https://news.example.com/2026/07/31/grafana-renewals?utm_source=rss&amp;utm_medium=feed</link>
+      <guid isPermaLink="false">tag:news.example.com,2026:post-4181</guid>
+      <pubDate>Fri, 31 Jul 2026 09:12:00 GMT</pubDate>
+      <dc:creator>Priya Raghunathan</dc:creator>
+      <author>priya@news.example.com (Priya Raghunathan)</author>
+      <category>observability</category>
+      <category>pricing</category>
+      <description><![CDATA[<p>Four operators of estates between forty and two
+        hundred services reported renewal quotes at two-and-a-half to three
+        times their previous annual figure, with no change in ingest volume.</p>
+        <p>Read the full breakdown.</p>]]></description>
+      <enclosure url="https://cdn.example.com/2026/07/renewal-chart.png"
+                 length="184320" type="image/png"/>
+    </item>
+
+    <!-- No <guid>: identity falls to rule 2, sha256 of the canonicalized link. -->
+    <item>
+      <title>Loki 3.4 lands with a smaller index footprint</title>
+      <link>https://news.example.com/2026/07/29/loki-34</link>
+      <pubDate>Wed, 29 Jul 2026 16:40:00 +0000</pubDate>
+      <description>The compactor now writes one index per tenant per day rather than per hour, which is where most of the object-storage request cost was going.</description>
+    </item>
+
+    <!-- No date of any kind: a DLQ record, never an invented timestamp. -->
+    <item>
+      <title>Corrections and clarifications</title>
+      <link>https://news.example.com/corrections</link>
+      <guid isPermaLink="false">tag:news.example.com,2026:page-corrections</guid>
+      <description>Standing page. Updated whenever we get something wrong.</description>
+    </item>
+
+    <!-- Oldest, and the only one carrying a full body in content:encoded. -->
+    <item>
+      <title>We moved forty services off hosted observability</title>
+      <link>https://news.example.com/2026/07/27/self-hosted-migration</link>
+      <guid isPermaLink="false">tag:news.example.com,2026:post-4166</guid>
+      <pubDate>Mon, 27 Jul 2026 07:05:00 GMT</pubDate>
+      <author>dmitri@news.example.com (Dmitri Sokolov)</author>
+      <category>case study</category>
+      <description>A six-week migration, two engineers, and a bill that is now
+        a third of what it was.</description>
+      <content:encoded><![CDATA[<article>
+        <p>We moved forty services onto self-hosted Grafana and Loki after the
+        renewal quote came back at three times the previous figure, which was
+        already the largest single line item on the infrastructure budget.</p>
+        <p>Ingest volume did not change at all over the period. The migration
+        took six weeks and two engineers, and the resulting stack is materially
+        cheaper to run than the vendor contract it replaced, even counting the
+        engineering time at fully loaded cost.</p>
+        <p>The parts that hurt were not the parts we planned for. Retention
+        policy, not query performance, is what took the extra fortnight.</p>
+      </article>]]></content:encoded>
+    </item>
+  </channel>
+</rss>

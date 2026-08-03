@@ -1,0 +1,36 @@
+{
+  "status": "ok",
+  "totalResults": 5,
+  "articles": [
+    {
+      "source": { "id": "the-verge", "name": "The Verge" },
+      "author": "Jamie Nguyen",
+      "title": "Our observability bill tripled, so we moved forty services off it",
+      "description": "A platform team explains why the renewal quote pushed them onto self-hosted Grafana and Loki.",
+      "url": "https://www.example-news.com/2026/07/28/observability-bill?utm_source=newsletter&utm_medium=email",
+      "urlToImage": "https://cdn.example-news.com/2026/07/observability.jpg",
+      "publishedAt": "2026-07-28T14:02:11Z",
+      "content": "We moved forty services onto self-hosted Grafana and Loki after the renewal quote came back at three times the previous figure, which was already the largest line item on the infrastruc… [+2317 chars]"
+    },
+    {
+      "source": { "id": null, "name": "Regional Wire" },
+      "author": "Staff",
+      "title": "Port authority publishes quarterly freight volumes",
+      "description": "Container throughput rose 4% year on year.",
+      "url": "https://wire.example.org/freight/q2-2026",
+      "urlToImage": null,
+      "publishedAt": "2026-07-28T13:40:00Z",
+      "content": "Container throughput rose four per cent year on year, the port authority said on Tuesday, with dry bulk flat and vehicle imports down sharply."
+    },
+    {
+      "source": { "id": "reuters", "name": "Reuters" },
+      "author": null,
+      "title": "Grid operator delays interconnector decision",
+      "description": "The decision on the cross-border interconnector slips to the fourth quarter, the operator said, citing an unfinished environmental review.",
+      "url": "https://news.example.co.uk/energy/interconnector-delay",
+      "urlToImage": "https://img.example.co.uk/energy/interconnector.png",
+      "publishedAt": "2026-07-28T12:15:30Z",
+      "content": null
+    }
+  ]
+}

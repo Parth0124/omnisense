@@ -1,0 +1,58 @@
+{
+  "kind": "Listing",
+  "data": {
+    "after": null,
+    "dist": 2,
+    "modhash": "",
+    "geo_filter": "",
+    "before": "t3_p1e",
+    "children": [
+      {
+        "kind": "t3",
+        "data": {
+          "id": "p2a",
+          "name": "t3_p2a",
+          "subreddit": "selfhosted",
+          "subreddit_id": "t5_2ubgg",
+          "subreddit_subscribers": 512340,
+          "title": "Weekly discussion thread",
+          "selftext": "Post your questions here.",
+          "author": "AutoModerator",
+          "author_fullname": "t2_6l4z3",
+          "link_flair_text": "Discussion",
+          "permalink": "/r/selfhosted/comments/p2a/weekly_discussion_thread/",
+          "created_utc": 1785237000.0,
+          "score": 55,
+          "num_comments": 130,
+          "upvote_ratio": 0.97,
+          "num_crossposts": 0,
+          "is_self": true,
+          "removed_by_category": null
+        }
+      },
+      {
+        "kind": "t3",
+        "data": {
+          "id": "p2b",
+          "name": "t3_p2b",
+          "subreddit": "selfhosted",
+          "subreddit_id": "t5_2ubgg",
+          "subreddit_subscribers": 512340,
+          "title": "Backups that actually restore",
+          "selftext": "Tested restores beat untested backups.",
+          "author": "restoretester",
+          "author_fullname": "t2_7ff01",
+          "link_flair_text": null,
+          "permalink": "/r/selfhosted/comments/p2b/backups_that_actually_restore/",
+          "created_utc": 1785236400.0,
+          "score": 240,
+          "num_comments": 41,
+          "upvote_ratio": 0.99,
+          "num_crossposts": 1,
+          "is_self": true,
+          "removed_by_category": null
+        }
+      }
+    ]
+  }
+}

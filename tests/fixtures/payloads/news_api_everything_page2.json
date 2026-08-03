@@ -1,0 +1,26 @@
+{
+  "status": "ok",
+  "totalResults": 5,
+  "articles": [
+    {
+      "source": { "id": null, "name": "[Removed]" },
+      "author": null,
+      "title": "[Removed]",
+      "description": "[Removed]",
+      "url": "https://removed.com",
+      "urlToImage": null,
+      "publishedAt": "1970-01-01T00:00:00Z",
+      "content": "[Removed]"
+    },
+    {
+      "source": { "id": null, "name": "Trade Daily" },
+      "author": "Wire Desk",
+      "title": "Steel futures close lower for a third session",
+      "description": "Rebar and hot-rolled coil both slipped as mill restarts outpaced demand.",
+      "url": "https://tradedaily.example.net/steel/2026-07-28",
+      "urlToImage": null,
+      "publishedAt": null,
+      "content": "Rebar and hot-rolled coil both slipped on Tuesday as mill restarts outpaced demand."
+    }
+  ]
+}

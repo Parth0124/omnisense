@@ -11,6 +11,16 @@ pytest-cov>=6.0,<7.0
 pytest-mock>=3.14,<4.0
 pytest-timeout>=2.3,<3.0
 respx>=0.21,<1.0
+aiosqlite>=0.20,<1.0        # tests/conftest.py builds every engine from
+                            # sqlite+aiosqlite://. Nothing pulls this in
+                            # transitively, so without it a clean
+                            # `pip install -r ...` produces an environment where
+                            # every test errors at engine creation.
+fakeredis[lua]>=2.26,<3.0   # the [lua] extra pulls `lupa`, which is what makes
+                            # fakeredis actually EXECUTE the token-bucket scripts
+                            # in connectors/ratelimit/limiter.py. Without it the
+                            # unit suite would assert against a Python
+                            # re-implementation of the Lua rather than the Lua.
 freezegun>=1.5,<2.0
 faker>=33.0
 factory-boy>=3.3
