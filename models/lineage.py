@@ -33,7 +33,46 @@ __all__ = [
     "ConfidenceComponents",
     "Lineage",
     "StageRecord",
+    "pipeline_version_ordinal",
 ]
+
+
+def pipeline_version_ordinal(version: str) -> int:
+    """Encode a semantic version as a sortable integer.
+
+    Exists because `pipeline_version` is stored as a `VARCHAR` and the upsert
+    guard in `services/signal_engine/store.py` must decide which of two writes is
+    newer. Compared as text, `'1.10.0' >= '1.9.0'` is **False** -- so the guard
+    would invert the moment any component reached 10, silently rejecting the
+    newer pipeline and accepting a stale backfill. That is the exact corruption
+    the guard was added to prevent, and it would surface as a warning log rather
+    than an error.
+
+    `major * 1_000_000 + minor * 1_000 + patch`, which orders correctly for any
+    component below 1000. Unparseable input returns 0 rather than raising: a
+    version string that is malformed should lose every comparison, not stop
+    ingestion.
+
+        >>> pipeline_version_ordinal("1.10.0") > pipeline_version_ordinal("1.9.0")
+        True
+    """
+    parts = version.strip().split(".")
+    numbers: list[int] = []
+    for part in parts[:3]:
+        # Tolerate a pre-release suffix such as "2.0.0-rc1" by taking the
+        # leading digits; a build tag must not make a version unorderable.
+        digits = ""
+        for char in part:
+            if not char.isdigit():
+                break
+            digits += char
+        if not digits:
+            return 0
+        numbers.append(int(digits))
+    while len(numbers) < 3:
+        numbers.append(0)
+    major, minor, patch = numbers
+    return major * 1_000_000 + minor * 1_000 + patch
 
 
 CURRENT_SCHEMA_VERSION = 1

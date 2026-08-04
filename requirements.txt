@@ -29,6 +29,15 @@ grpcio>=1.41                # imported DIRECTLY by backend/db/qdrant.py for
 opensearch-py[async]>=2.8,<3.0   # the [async] extra pulls aiohttp; without it
                                  # `from opensearchpy import AsyncOpenSearch` ImportErrors
 boto3>=1.35,<2.0            # Cloudflare R2 via the S3-compatible API
+botocore>=1.35,<2.0         # imported DIRECTLY by backend/db/r2.py and
+                            # services/storage/object_store.py for Config and the
+                            # BotoCoreError/ClientError taxonomy, not merely
+                            # reached through boto3
+zstandard>=0.23,<1.0        # transport compression for the raw-payload archive in
+                            # services/storage/object_store.py. Not a key concern:
+                            # ADR-0006 fixes the key template and compression must
+                            # not change it, so the codec is detected from the
+                            # object's own magic bytes on read
 
 # ------------------------------------------------------------------- Messaging
 aiokafka>=0.12,<1.0
@@ -38,7 +47,13 @@ langgraph>=0.2,<1.0
 langgraph-checkpoint-postgres>=2.0,<3.0
 langchain-core>=0.3,<1.0
 langchain-anthropic>=0.3,<1.0
-anthropic>=0.40,<1.0
+anthropic>=0.120,<1.0      # imported DIRECTLY by services/llm/anthropic_provider.py.
+                           # The floor is not cosmetic: that module depends on
+                           # `messages.parse(output_format=...)` -> `.parsed_output`
+                           # and on `output_config`, neither of which exists in the
+                           # 0.4x-era SDK the old floor allowed. Resolving low would
+                           # not fail at install; it would AttributeError on the first
+                           # structured call, in a worker, in production
 mcp>=1.1,<2.0
 
 # ----------------------------------------------------------- Signal enrichment
@@ -48,6 +63,11 @@ beautifulsoup4>=4.12,<5.0
 lxml>=5.3,<6.0
 trafilatura>=1.12,<2.0
 langdetect>=1.0.9
+charset-normalizer>=3.4,<4.0   # imported DIRECTLY by services/signal_engine/cleaning.py
+                               # as the last rung of the decode ladder, not merely
+                               # pulled in transitively by httpx/requests; pinned here
+                               # so a mislabelled provider body cannot start silently
+                               # falling back to cp1252 because a transitive dep moved
 python-dateutil>=2.9
 feedparser>=6.0,<7.0
 rapidfuzz>=3.10,<4.0

@@ -36,6 +36,7 @@ __all__ = [
     "Environment",
     "EmbeddingProvider",
     "KafkaSettings",
+    "LLMEffort",
     "LLMProvider",
     "LogFormat",
     "LogLevel",
@@ -110,6 +111,24 @@ class LLMProvider(enum.StrEnum):
     AZURE_OPENAI = "azure_openai"
     OLLAMA = "ollama"
     LITELLM = "litellm"
+
+
+class LLMEffort(enum.StrEnum):
+    """How much reasoning the model spends before it answers.
+
+    The current Claude generation removed `temperature`/`top_p`/`top_k` and
+    replaced the old fixed thinking budget with this: effort is the depth dial.
+    Deliberately **unset** by default -- an omitted value means "the provider's
+    own default", which is where the vendor's tuning lives, and pinning a level
+    here would freeze that tuning at whatever was current the day it was typed.
+    Set it when a deployment has measured a level that beats the default.
+    """
+
+    LOW = "low"
+    MEDIUM = "medium"
+    HIGH = "high"
+    XHIGH = "xhigh"
+    MAX = "max"
 
 
 class EmbeddingProvider(enum.StrEnum):
@@ -371,11 +390,25 @@ class LLMSettings(BaseSettings):
     model_worker: str = Field(default="claude-sonnet-5", alias="LLM_MODEL_WORKER")
     model_fast: str = Field(default="claude-haiku-4-5-20251001", alias="LLM_MODEL_FAST")
 
-    max_output_tokens: int = Field(default=8192, ge=1, alias="LLM_MAX_OUTPUT_TOKENS")
+    max_output_tokens: int = Field(
+        default=16000,
+        ge=1,
+        alias="LLM_MAX_OUTPUT_TOKENS",
+        description="Caps thinking *plus* response text together on the current "
+        "Claude generation, where thinking is on by default. 8192 -- the obvious "
+        "number, and the old default -- is low enough that a planner call can "
+        "spend its whole budget reasoning and return a truncated answer, which "
+        "presents as a model-quality problem rather than as the config defect it is.",
+    )
     timeout_seconds: int = Field(default=120, ge=1, alias="LLM_TIMEOUT_SECONDS")
     max_retries: int = Field(default=3, ge=0, alias="LLM_MAX_RETRIES")
     cache_enabled: bool = Field(default=True, alias="LLM_CACHE_ENABLED")
     temperature: float = Field(default=0.0, ge=0.0, le=2.0, alias="LLM_TEMPERATURE")
+    effort: LLMEffort | None = Field(
+        default=None,
+        alias="LLM_EFFORT",
+        description="Reasoning depth. Unset means the provider's own default; see LLMEffort.",
+    )
 
 
 class EmbeddingSettings(BaseSettings):

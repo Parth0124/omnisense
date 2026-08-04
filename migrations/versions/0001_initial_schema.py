@@ -303,6 +303,12 @@ def upgrade() -> None:
         sa.Column("duplicate_of", sa.String(length=64), nullable=True),
         sa.Column("schema_version", sa.Integer(), nullable=False),
         sa.Column("pipeline_version", sa.String(length=32), nullable=False),
+        # The column the upsert guard actually compares. `pipeline_version` is a
+        # VARCHAR, so the database orders it as text and `'1.10.0' >= '1.9.0'` is
+        # False -- the guard would invert as soon as a component reached 10.
+        sa.Column(
+            "pipeline_version_ord", sa.Integer(), nullable=False, server_default="0"
+        ),
         sa.Column("connector_slug", sa.String(length=64), nullable=False),
         sa.Column("sync_run_id", sa.String(length=64), nullable=True),
         sa.Column("indexed_vector_at", sa.DateTime(timezone=True), nullable=True),

@@ -152,6 +152,23 @@ class SignalRow(Base, TimestampMixin, TenantMixin):
 
     schema_version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
     pipeline_version: Mapped[str] = mapped_column(String(32), nullable=False, default="0.0.0")
+    pipeline_version_ord: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default="0"
+    )
+    """`pipeline_version` as a sortable integer. The column the upsert guard compares.
+
+    The guard exists to stop a slow reprocess from overwriting a newer
+    enrichment, and it cannot be written against `pipeline_version` itself: that
+    is a `VARCHAR`, so the database compares it as *text*, where
+    `'1.10.0' >= '1.9.0'` is **False** and `'1.9.0' >= '1.10.0'` is **True**. The
+    guard would therefore invert the moment a version component reached 10 --
+    silently rejecting the newer pipeline and accepting a stale backfill, which
+    is precisely the corruption it was added to prevent.
+
+    Encoded by `pipeline_version_ordinal()` as `major*1_000_000 + minor*1_000 +
+    patch`. `docs/data-stores.md` §5.2 also needs an integer version for the
+    OpenSearch external document version, so one column serves both.
+    """
     connector_slug: Mapped[str] = mapped_column(String(64), nullable=False)
     sync_run_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
     """Groups a connector run so a bad run can be identified and reverted wholesale."""
