@@ -66,6 +66,7 @@ from services.signal_engine.normalize import (
     NormalizeStage,
     default_field_map_resolver,
 )
+from workers.enrichment_worker import build_pipeline as production_build_pipeline
 from services.signal_engine.pipeline import (
     EnrichmentContext,
     PipelineResult,
@@ -274,22 +275,22 @@ def build_pipeline(
 ) -> SignalPipeline:
     """The whole of Design Doc §6, in order, with every dependency injected.
 
-    This is the assembly `workers/enrichment_worker.py` owes the system. Written
-    out longhand rather than behind a factory helper because the *order* and the
-    *dependencies* are the thing under test: a helper that hid either would let
-    the pipeline this suite proves correct drift away from the one that ships.
+    Delegates to `workers.enrichment_worker.build_pipeline` rather than listing
+    the stages again. That indirection is the point: the *order* and the
+    *dependencies* are what this suite asserts on, and asserting them against a
+    local copy would prove only that the copy is self-consistent. Pointing at the
+    shipping factory means a stage added, removed or reordered in production
+    fails here -- which is what the assertions were always meant to catch.
     """
-    return SignalPipeline(
-        [
-            CleaningStage(),
-            NormalizeStage(),
-            LanguageStage(LangdetectDetector()),
-            EntityExtractionStage(llm),
-            SentimentStage(llm),
-            EmbeddingStage(embedder, collection=COLLECTION, sink=sink),
-            ScoringStage(baseline=InMemoryCohortBaseline()),
-            StoreStage(session_factory, publisher),
-        ],
+    return production_build_pipeline(
+        llm=llm,
+        embeddings=embedder,
+        baseline=InMemoryCohortBaseline(),
+        session_factory=session_factory,
+        publisher=publisher,
+        language_detector=LangdetectDetector(),
+        collection=COLLECTION,
+        vector_sink=sink,
         pipeline_version=pipeline_version,
     )
 
