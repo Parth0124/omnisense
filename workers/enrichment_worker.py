@@ -85,7 +85,6 @@ def build_pipeline(
     language_detector: object | None = None,
     collection: str | None = None,
     vector_sink: object | None = None,
-    baseline_weights: dict[str, float] | None = None,
     pipeline_version: str = PIPELINE_VERSION,
 ) -> SignalPipeline:
     """Assemble the eight stages in the order Design Doc §6 fixes.

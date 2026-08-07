@@ -225,28 +225,51 @@ class GraphReader(Protocol):
 def load_graph_service(**kwargs: object) -> GraphReader:
     """Construct the real graph service, or say precisely what is missing.
 
-    `NotImplementedError` rather than a stub reader that returns nothing: an
-    empty neighbourhood is a *meaningful* answer -- it says this entity has no
-    recorded relationships -- so a stub would make "the graph is not built yet"
+    With no arguments it goes through `services.graph_service.build_graph_service`,
+    the composition root that wires a `GraphClient` over the process-wide Neo4j
+    driver. Passing `client=` (or any other constructor argument) builds one
+    directly instead, which is how a worker with its own tuned timeout, and every
+    test, gets a service without touching a driver singleton.
+
+    Nothing here degrades to a stub reader that returns nothing. An empty
+    neighbourhood is a *meaningful* answer -- it says this entity has no recorded
+    relationships -- so a stub would make "the graph is not wired up"
     indistinguishable from "these companies are unrelated", and the Competitor
-    agent would report the second.
+    agent would confidently report the second.
     """
     import services.graph_service as graph_service
 
     service_cls = getattr(graph_service, "GraphService", None)
     if service_cls is None:
         raise NotImplementedError(
-            "services/graph_service.py does not define GraphService yet, so the graph "
+            "services/graph_service.py does not define GraphService, so the graph "
             "tools cannot be bound. Implement it against "
             "agents.tools.graph_tools.GraphReader (search_entities, neighbours, "
             "find_paths, subgraph); agents must not reach graph/ or Neo4j directly."
         )
-    reader = service_cls(**kwargs)
+
+    if kwargs:
+        reader = service_cls(**kwargs)
+    else:
+        builder = getattr(graph_service, "build_graph_service", None)
+        if builder is None:
+            raise NotImplementedError(
+                "services/graph_service.py defines GraphService but no "
+                "build_graph_service() composition root, so there is no way to "
+                "wire it to a Neo4j driver without an explicit client=."
+            )
+        reader = builder()
+
     if not isinstance(reader, GraphReader):
+        missing = [
+            name
+            for name in ("search_entities", "neighbours", "find_paths", "subgraph")
+            if not hasattr(reader, name)
+        ]
         raise NotImplementedError(
             "services.graph_service.GraphService does not satisfy "
-            "agents.tools.graph_tools.GraphReader; the graph tools need all four "
-            "read methods before they can be registered."
+            f"agents.tools.graph_tools.GraphReader; missing {', '.join(missing) or 'nothing by name'}. "
+            "The graph tools need all four read methods before they can be registered."
         )
     return reader
 

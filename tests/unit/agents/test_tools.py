@@ -1183,13 +1183,51 @@ class TestGraphTools:
         assert [hop.entity_id for hop in hops] == ["a", "b", "c"]
         assert hops[-1].predicate_to_next is None
 
-    def test_the_unimplemented_graph_service_says_what_is_missing(self) -> None:
+    def test_the_real_graph_service_satisfies_the_port(self) -> None:
+        """`services.graph_service.GraphService` is the reader agents get.
+
+        Asserted structurally rather than by importing it and calling something,
+        because the value of the check is that it fails the moment the two
+        signatures drift -- which is a rename away, and would otherwise surface
+        as an `AttributeError` inside a running investigation.
+        """
+        from agents.tools.graph_tools import GraphReader
+        from graph.client import GraphClient
+        from services.graph_service import GraphService
+
+        async def _runner(cypher: str, parameters: Any = None) -> list[dict[str, Any]]:
+            return []
+
+        reader = load_graph_service(client=GraphClient(_runner))
+        assert isinstance(reader, GraphReader)
+        assert isinstance(reader, GraphService)
+
+    def test_a_reader_missing_a_method_names_it(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         """An empty neighbourhood is a meaningful answer -- "these companies are
-        unrelated" -- so a stub would make a missing service look like a finding."""
+        unrelated" -- so a half-bound service must fail loudly rather than return
+        nothing and have that read as a finding.
+
+        The error names the missing methods, because the alternative message
+        ("does not satisfy the protocol") sends the reader to compare two files
+        by eye.
+        """
+        import services.graph_service as graph_service
+
+        class Incomplete:
+            def __init__(self, **_: Any) -> None: ...
+
+            async def search_entities(self, *a: Any, **k: Any) -> list[Any]:
+                return []
+
+        monkeypatch.setattr(graph_service, "GraphService", Incomplete)
         with pytest.raises(NotImplementedError) as caught:
-            load_graph_service()
-        assert "GraphService" in str(caught.value)
-        assert "GraphReader" in str(caught.value)
+            load_graph_service(client=object())
+        message = str(caught.value)
+        assert "GraphReader" in message
+        assert "neighbours" in message
+        assert "find_paths" in message
 
 
 # =========================================================================== #
