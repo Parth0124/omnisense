@@ -41,23 +41,20 @@ request that carries no key at all -- rather than failing every `POST` in the
 API. The cost is a possible duplicate investigation during an outage; the
 alternative cost is no investigations at all.
 
-A note on what is *not* here. `backend/core/security.py` is still a stub, so JWT
-verification is implemented below rather than imported. It is deliberately
-written against the standard library instead of pulling in PyJWT: the algorithm
-is fixed at HS256 by `docs/security-and-privacy.md` §3.1, HMAC-SHA256 is thirty
-lines, and a token verifier whose algorithm agility is a hardcoded allowlist
-cannot be talked into `alg: none`. When `backend/core/security.py` lands this
-section moves there wholesale and this module imports it.
+A note on the split with `backend/core/security.py`. The cryptography -- signing,
+constant-time comparison, the closed algorithm table that cannot be talked into
+`alg: none` -- lives there. What stays here is the *policy* around it: that every
+verification failure produces the same bare `401` with the reason logged rather
+than returned, and that the algorithm comes from settings rather than from the
+token's own header. `decode_jws` carries its reason on the exception precisely so
+that this layer can make that choice instead of having it made in the kernel.
 
 Layer note: `backend/api/` (L4). May import `services/`, `models/`, `backend/`.
 """
 
 from __future__ import annotations
 
-import base64
-import binascii
 import hashlib
-import hmac
 import json
 import re
 import uuid
@@ -80,6 +77,12 @@ from backend.core.exceptions import (
     ValidationError,
 )
 from backend.core.logging import get_logger
+from backend.core.security import (
+    SUPPORTED_JWT_ALGORITHMS,
+    JwsError,
+    decode_jws,
+    encode_jws,
+)
 from backend.schemas.common import DEFAULT_PAGE_LIMIT, MAX_PAGE_LIMIT
 from models.base import utcnow
 from models.orm.mixins import DEFAULT_TENANT
@@ -303,20 +306,6 @@ and evaluation surface that runs a model outside the orchestrated flow with no
 step budget above it, which is not something a `viewer` role should imply.
 """
 
-_SUPPORTED_JWT_ALGORITHMS: Final[Mapping[str, str]] = {
-    "HS256": "sha256",
-    "HS384": "sha384",
-    "HS512": "sha512",
-}
-"""Allowlist, keyed by JWS `alg`. Anything absent is rejected before verification.
-
-The allowlist *is* the defence. The classic JWT forgery is `{"alg": "none"}`, and
-its close cousin is an RS256 public key accepted as an HS256 shared secret; both
-work only against a verifier that lets the token choose the algorithm. Here the
-token's `alg` must both appear in this table and equal `JWT_ALGORITHM`, so it
-selects nothing -- it either matches the configured algorithm or the token is
-rejected.
-"""
 
 _API_KEY_PATTERN: Final = re.compile(r"^om_[A-Za-z0-9]{4,64}_[A-Za-z0-9_\-]{16,128}$")
 """Shape of a service API key, `om_<id>_<secret>` (`docs/security-and-privacy.md` §3.1)."""
@@ -346,86 +335,36 @@ class Principal:
         return sorted(scope for scope in required if scope not in self.scopes)
 
 
-def _b64url_decode(segment: str) -> bytes:
-    """Decode one base64url JWS segment, restoring the padding JWS strips."""
-    padded = segment + "=" * (-len(segment) % 4)
-    return base64.urlsafe_b64decode(padded)
-
-
-def _b64url_encode(raw: bytes) -> str:
-    return base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
 
 
 def _decode_jwt(token: str, settings: Settings) -> dict[str, Any]:
-    """Verify an HS256 session token and return its claims.
+    """Verify a session token and return its claims.
 
-    Every failure raises the same bare `UnauthenticatedError`. That is deliberate
-    and is stated on the exception itself: *"Never include the reason in
-    `details`. 'Signature invalid' versus 'token expired' tells an attacker which
-    half of a forgery attempt succeeded."* The reason is logged instead, where the
-    operator can see it and the caller cannot.
+    The cryptography lives in `backend/core/security.py`; this function owns the
+    *policy* around it, which is the split that module's docstring asks for. What
+    stays here is the pair of decisions the kernel deliberately refuses to make:
 
-    Verification order matters. The signature is checked **before** the claims are
-    read for anything but the algorithm: an unverified payload is attacker-typed
-    JSON, and deciding "this token is for tenant X" from it before proving it was
-    signed is how a verifier is talked into trusting an unsigned claim.
+    **Every failure raises the same bare `UnauthenticatedError`.** The exception
+    itself states why: *"Never include the reason in `details`. 'Signature
+    invalid' versus 'token expired' tells an attacker which half of a forgery
+    attempt succeeded."* `decode_jws` carries the reason on `JwsError` precisely
+    so that this layer can log it and withhold it, rather than having the choice
+    made for it.
+
+    **The algorithm comes from settings, never from the token.** Passed in
+    explicitly, so a header claiming `HS512` against an HS256 deployment fails
+    even though both are supported.
     """
-    parts = token.split(".")
-    if len(parts) != 3:
-        logger.info("api.auth.rejected", reason="malformed_jws")
-        raise UnauthenticatedError()
-
-    header_segment, payload_segment, signature_segment = parts
     try:
-        header = json.loads(_b64url_decode(header_segment))
-        signature = _b64url_decode(signature_segment)
-    except (binascii.Error, UnicodeDecodeError, ValueError):
-        logger.info("api.auth.rejected", reason="undecodable_segment")
+        return decode_jws(
+            token,
+            secret=settings.security.secret_key.get_secret_value(),
+            algorithm=settings.security.jwt_algorithm,
+            now=utcnow().timestamp(),
+        )
+    except JwsError as error:
+        logger.info("api.auth.rejected", reason=error.reason)
         raise UnauthenticatedError() from None
-
-    configured = settings.security.jwt_algorithm.upper()
-    algorithm = header.get("alg") if isinstance(header, dict) else None
-    if algorithm != configured or configured not in _SUPPORTED_JWT_ALGORITHMS:
-        logger.info("api.auth.rejected", reason="algorithm_mismatch", algorithm=algorithm)
-        raise UnauthenticatedError()
-
-    digest = _SUPPORTED_JWT_ALGORITHMS[configured]
-    expected = hmac.new(
-        settings.security.secret_key.get_secret_value().encode("utf-8"),
-        f"{header_segment}.{payload_segment}".encode("ascii"),
-        digest,
-    ).digest()
-    # `compare_digest`, not `==`. A byte-by-byte comparison returns early on the
-    # first mismatch, and the time it takes leaks how many leading bytes of a
-    # forged signature were right -- which is enough to construct one byte at a
-    # time over enough requests.
-    if not hmac.compare_digest(expected, signature):
-        logger.info("api.auth.rejected", reason="bad_signature")
-        raise UnauthenticatedError()
-
-    try:
-        claims = json.loads(_b64url_decode(payload_segment))
-    except (binascii.Error, UnicodeDecodeError, ValueError):
-        logger.info("api.auth.rejected", reason="undecodable_claims")
-        raise UnauthenticatedError() from None
-    if not isinstance(claims, dict):
-        logger.info("api.auth.rejected", reason="claims_not_an_object")
-        raise UnauthenticatedError()
-
-    now = utcnow().timestamp()
-    expiry = claims.get("exp")
-    # `exp` is required rather than optional. A session token with no expiry is a
-    # permanent credential that no revocation path in this system can reach --
-    # there is no token blocklist and §3.1 fixes the TTL at
-    # ACCESS_TOKEN_TTL_SECONDS precisely so that expiry *is* the revocation path.
-    if not isinstance(expiry, (int, float)) or now >= float(expiry):
-        logger.info("api.auth.rejected", reason="expired_or_no_exp")
-        raise UnauthenticatedError()
-    not_before = claims.get("nbf")
-    if isinstance(not_before, (int, float)) and now < float(not_before):
-        logger.info("api.auth.rejected", reason="not_yet_valid")
-        raise UnauthenticatedError()
-    return claims
 
 
 def _scopes_from_claims(claims: Mapping[str, Any]) -> frozenset[str]:
@@ -470,12 +409,11 @@ def mint_access_token(
     """Sign a session token the API will accept.
 
     This is a *verifier's* helper, not an authentication service. It exists
-    because there is nowhere else to mint a token: there is no login endpoint, no
-    identity provider and no `backend/core/security.py` yet, so without it the
-    API is a surface nobody -- including its own test suite and
-    `scripts/sync_connector.py` -- can call. It moves to
-    `backend/core/security.py` alongside the verifier the moment that module
-    exists.
+    because there is nowhere else to mint a token: there is no login endpoint and
+    no identity provider, so without it the API is a surface nobody -- including
+    its own test suite and `scripts/sync_connector.py` -- can call. The signing
+    itself is `backend/core/security.encode_jws`, so the issuer and the verifier
+    share one implementation and cannot disagree about the encoding.
 
     It signs with `SECRET_KEY`, which is exactly what a Phase 1 HS256 issuer
     would do (`docs/security-and-privacy.md` §3.1). The symmetric key is also why
@@ -485,10 +423,10 @@ def mint_access_token(
     """
     resolved = settings or get_settings()
     algorithm = resolved.security.jwt_algorithm.upper()
-    if algorithm not in _SUPPORTED_JWT_ALGORITHMS:
+    if algorithm not in SUPPORTED_JWT_ALGORITHMS:
         raise ValueError(
             f"JWT_ALGORITHM={algorithm!r} is not supported; this issuer signs "
-            f"only {sorted(_SUPPORTED_JWT_ALGORITHMS)}"
+            f"only {sorted(SUPPORTED_JWT_ALGORITHMS)}"
         )
 
     issued = int(utcnow().timestamp())
@@ -504,14 +442,11 @@ def mint_access_token(
     if role is not None:
         claims["role"] = role
 
-    header = _b64url_encode(json.dumps({"alg": algorithm, "typ": "JWT"}, separators=(",", ":")).encode())
-    payload = _b64url_encode(json.dumps(claims, separators=(",", ":"), sort_keys=True).encode())
-    signature = hmac.new(
-        resolved.security.secret_key.get_secret_value().encode("utf-8"),
-        f"{header}.{payload}".encode("ascii"),
-        _SUPPORTED_JWT_ALGORITHMS[algorithm],
-    ).digest()
-    return f"{header}.{payload}.{_b64url_encode(signature)}"
+    return encode_jws(
+        claims,
+        secret=resolved.security.secret_key.get_secret_value(),
+        algorithm=algorithm,
+    )
 
 
 async def current_principal(
