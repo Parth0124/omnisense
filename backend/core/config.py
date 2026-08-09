@@ -28,7 +28,7 @@ import functools
 import re
 from typing import Self
 
-from pydantic import Field, SecretStr, computed_field, model_validator
+from pydantic import AliasChoices, Field, SecretStr, computed_field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 __all__ = [
@@ -384,7 +384,23 @@ class LLMSettings(BaseSettings):
 
     provider: LLMProvider = Field(default=LLMProvider.ANTHROPIC, alias="LLM_PROVIDER")
     anthropic_api_key: SecretStr | None = Field(default=None, alias="ANTHROPIC_API_KEY")
-    base_url: str | None = Field(default=None, alias="LLM_BASE_URL")
+
+    api_key: SecretStr | None = Field(
+        default=None,
+        validation_alias=AliasChoices("LLM_API_KEY", "OPENROUTER_API_KEY", "OPENAI_API_KEY"),
+        description="Credential for any non-Anthropic backend -- OpenRouter, "
+        "OpenAI, LiteLLM. Separate from ANTHROPIC_API_KEY because a deployment "
+        "can legitimately hold both: Anthropic direct for chat and an aggregator "
+        "for a cheaper fast tier, and collapsing them into one field would make "
+        "switching provider silently reuse the wrong credential.",
+    )
+    base_url: str | None = Field(
+        default=None,
+        alias="LLM_BASE_URL",
+        description="Endpoint override. Required for provider=ollama or litellm; "
+        "defaults to OpenRouter for provider=openai, which is where an "
+        "unqualified 'openai' setting almost always points in practice.",
+    )
 
     model_planner: str = Field(default="claude-opus-5", alias="LLM_MODEL_PLANNER")
     model_worker: str = Field(default="claude-sonnet-5", alias="LLM_MODEL_WORKER")

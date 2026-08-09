@@ -422,26 +422,21 @@ def build_default_pipeline(
 def _resolve_llm_provider(settings: Settings) -> Any:
     """Build the configured chat provider.
 
-    Only Anthropic is implemented. The other seven members of `LLMProvider` are
-    declared in `backend/core/config.py` because the AI layer is model-agnostic
-    by design (Design Doc §15), but declaring an enum member is not implementing
-    a client -- and a deployment that set `LLM_PROVIDER=openai` and silently got
-    Anthropic would be billed against the wrong account and produce output
-    attributed to the wrong model in `lineage.stages[]`.
-    """
-    from backend.core.config import LLMProvider as LLMProviderChoice
-    from services.llm.anthropic_provider import AnthropicProvider
+    Delegates to `agents.composition.build_llm_provider`, which is the single
+    place the backend is chosen. This function existed first and had its own
+    Anthropic-only branch -- so a deployment that set `LLM_PROVIDER=openai` got
+    a working API and agent graph, and an enrichment worker that refused to
+    start. Two selection paths is exactly the failure the composition root was
+    introduced to prevent, and one of them being older is not a reason to keep
+    it.
 
-    choice = settings.llm.provider
-    if choice is LLMProviderChoice.ANTHROPIC:
-        return AnthropicProvider(settings=settings.llm)
-    raise ConfigurationError(
-        f"LLM_PROVIDER={choice.value!r} has no client in this build; only "
-        "'anthropic' is implemented (services/llm/anthropic_provider.py). Add a "
-        "provider module implementing services.llm.provider.LLMProvider, or set "
-        "LLM_PROVIDER=anthropic.",
-        details={"provider": choice.value},
-    )
+    The import is local because `workers/` is a process boundary: importing the
+    agent package at module scope would pull LangGraph into a worker whose only
+    LLM use is sentiment and entity extraction.
+    """
+    from agents.composition import build_llm_provider
+
+    return build_llm_provider(settings.llm)
 
 
 def build_worker(

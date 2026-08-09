@@ -81,8 +81,20 @@ api: ## Run the FastAPI gateway with reload
 	$(BIN)/uvicorn backend.main:app --reload --host 0.0.0.0 --port 8000
 
 .PHONY: worker
-worker: ## Run the enrichment worker
+worker: ## Run the enrichment worker (signals -> 8-stage pipeline -> Postgres)
 	$(BIN)/python -m workers.enrichment_worker
+
+.PHONY: investigator
+investigator: ## Run the investigation worker (drives the agent graph)
+	$(BIN)/python -m workers.investigation_worker
+
+.PHONY: indexer
+indexer: ## Run the indexing worker (Postgres -> Qdrant + OpenSearch)
+	$(BIN)/python -m workers.indexing_worker
+
+.PHONY: grapher
+grapher: ## Run the graph worker (Postgres -> Neo4j)
+	$(BIN)/python -m workers.graph_worker
 
 .PHONY: scheduler
 scheduler: ## Run the connector sync scheduler
@@ -91,6 +103,17 @@ scheduler: ## Run the connector sync scheduler
 .PHONY: frontend
 frontend: ## Run the Next.js dev server
 	cd frontend && npm run dev
+
+.PHONY: dev
+dev: ## Everything needed to run an investigation, in one process group.
+	@echo "Starting API + investigation worker + frontend."
+	@echo "Ctrl-C stops all three."
+	@echo ""
+	@trap 'kill 0' EXIT INT TERM; \
+		$(BIN)/uvicorn backend.main:app --host 0.0.0.0 --port 8000 & \
+		$(BIN)/python -m workers.investigation_worker & \
+		(cd frontend && npm run dev) & \
+		wait
 
 # --------------------------------------------------------------- Migrations ---
 

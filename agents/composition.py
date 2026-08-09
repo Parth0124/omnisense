@@ -279,9 +279,7 @@ def build_default_bundle(
     resolved = settings if settings is not None else get_settings()
 
     if provider is None:
-        from services.llm.anthropic_provider import AnthropicProvider
-
-        provider = AnthropicProvider(settings=resolved.llm)
+        provider = build_llm_provider(resolved.llm)
 
     if registry is None:
         from agents.tools.registry import build_default_registry
@@ -301,6 +299,51 @@ def build_default_bundle(
         logger.info("tools.registered", toolsets=sorted(toolsets))
 
     return build_agents(provider=provider, registry=registry, settings=resolved)
+
+
+def build_llm_provider(settings: Any) -> LLMProvider:
+    """Pick the model backend from `LLM_PROVIDER`.
+
+    The one place the choice is made. `docs/architecture.md` treats the AI layer
+    as model-agnostic, and that only holds if selection happens once -- a second
+    site that constructed Anthropic directly would silently ignore the setting,
+    and the symptom would be an unexplained bill against a provider the
+    deployment thought it had switched away from.
+
+    Anthropic has its own module because it speaks the Messages API.
+    Everything else in the ecosystem -- OpenRouter, OpenAI, Ollama, LiteLLM,
+    vLLM -- accepts the OpenAI chat-completions shape, so they share one
+    provider and differ only by `LLM_BASE_URL`.
+    """
+    from backend.core.config import LLMProvider as ProviderName
+
+    name = settings.provider
+
+    if name is ProviderName.ANTHROPIC:
+        from services.llm.anthropic_provider import AnthropicProvider
+
+        return AnthropicProvider(settings=settings)
+
+    if name in (
+        ProviderName.OPENAI,
+        ProviderName.OLLAMA,
+        ProviderName.LITELLM,
+        ProviderName.AZURE_OPENAI,
+    ):
+        from services.llm.openai_compatible import OpenAICompatibleProvider
+
+        key = settings.api_key or settings.anthropic_api_key
+        return OpenAICompatibleProvider(
+            settings=settings,
+            api_key=key.get_secret_value() if key else None,
+        )
+
+    raise NotImplementedError(
+        f"LLM_PROVIDER={name.value!r} has no implementation. Supported today: "
+        "anthropic (native), and openai / ollama / litellm / azure_openai "
+        "(OpenAI chat-completions shape, selected by LLM_BASE_URL). "
+        "google, bedrock and vertex are declared in the enum but not built."
+    )
 
 
 def _toolset_factories() -> dict[str, Any]:
