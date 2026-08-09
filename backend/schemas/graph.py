@@ -48,6 +48,7 @@ __all__ = [
     "SignalMentionItem",
     "SubgraphRequest",
     "SubgraphResponse",
+    "TopicActivityItem",
 ]
 
 MAX_GRAPH_QUERY_CHARS: Final = 200
@@ -254,6 +255,23 @@ class SubgraphResponse(ResponseModel):
             "and a client must not present it as the complete neighbourhood."
         )
     )
+
+
+class TopicActivityItem(ResponseModel):
+    """One topic's mention volume over a window. Backs the trends view."""
+
+    topic_id: str
+    topic: str
+    mentions: int = Field(description="Distinct signals mentioning it in the window.")
+    avg_sentiment: float | None = Field(
+        default=None,
+        description=(
+            "-1 to 1, averaged over mentions. Null when no mention carried a "
+            "sentiment -- which is different from neutral, and a UI that renders "
+            "the two the same claims an assessment nobody made."
+        ),
+    )
+    last_mentioned_at: datetime | None = None
 
 
 class GraphPathItem(ResponseModel):

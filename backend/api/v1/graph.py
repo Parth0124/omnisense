@@ -50,6 +50,7 @@ from backend.schemas.graph import (
     RelationshipBasis,
     SignalMentionItem,
     SubgraphRequest,
+    TopicActivityItem,
     SubgraphResponse,
 )
 from models.enums import EntityType
@@ -375,6 +376,53 @@ async def get_paths(
     return GraphPathsResponse(
         source_id=source_id, target_id=target_id, paths=items, connected=bool(items)
     )
+
+
+@router.get(
+    "/topics/activity",
+    summary="Topic mention volume over a window. Backs the trends view.",
+    response_model=list[TopicActivityItem],
+    responses=problem_responses(401, 403, 422, 503),
+)
+async def get_topic_activity(
+    principal: ReaderPrincipal,
+    service: GraphDep,
+    window_days: Annotated[int, Query(ge=1, le=365)] = 30,
+    min_salience: Annotated[float, Query(ge=0.0, le=1.0)] = 0.3,
+    limit: Annotated[int, Query(ge=1, le=100)] = 25,
+) -> list[TopicActivityItem]:
+    """Which topics are being talked about, and how much.
+
+    Degrades to an empty list when the graph is unreachable, unlike
+    `/graph/search`. The distinction is that this is a *summary* view -- an empty
+    trends page during a Neo4j outage is a thin page, while an empty search
+    result is a wrong answer to a specific question.
+
+    The window is computed here rather than in the query text so two calls a
+    second apart read the same window; server-clock arithmetic inside Cypher
+    would make a paginated result drop or repeat rows across pages.
+    """
+    from datetime import timedelta
+
+    until = datetime.now(UTC)
+    rows = await service.topic_activity(
+        tenant_id=principal.tenant_id,
+        since=until - timedelta(days=window_days),
+        until=until,
+        min_salience=min_salience,
+        limit=limit,
+        allow_degraded=True,
+    )
+    return [
+        TopicActivityItem(
+            topic_id=row.topic_id,
+            topic=row.topic,
+            mentions=row.mentions,
+            avg_sentiment=row.avg_sentiment,
+            last_mentioned_at=row.last_mentioned_at,
+        )
+        for row in rows
+    ]
 
 
 @router.post(

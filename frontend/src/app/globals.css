@@ -2,4 +2,196 @@
 @tailwind components;
 @tailwind utilities;
 
-/* TODO: shadcn/ui CSS variables for light and dark themes. */
+/**
+ * The palette.
+ *
+ * Dark, but deliberately not black. A pure #000 background against near-white
+ * text is the highest-contrast combination available and it is genuinely
+ * uncomfortable to read for the length of time someone spends watching an
+ * investigation run -- the halation around glyphs on an OLED panel is worst at
+ * maximum contrast. The background here sits at 11% lightness: unmistakably
+ * dark, with enough tone that surfaces layered on it are distinguishable by
+ * lightness alone rather than needing borders everywhere.
+ *
+ * Restrained on colour for a reason specific to this product. The UI's job is to
+ * show evidence quality and processing state, and both are communicated by a
+ * small number of semantic colours -- confidence bands, sentiment, step status.
+ * If the chrome is also colourful those signals stop reading as signals. So the
+ * surfaces are neutral blue-grey, and saturation is reserved for things that
+ * mean something.
+ *
+ * One accent, used sparingly: a desaturated cyan-blue for interactive elements
+ * and the active step. Semantic colours (positive / caution / negative) are
+ * tuned to roughly equal perceived lightness so a status row does not visually
+ * jump when a step changes state.
+ */
+
+@layer base {
+  :root {
+    /* Light theme retained so the app is usable in a bright room, but dark is
+       the default and the one that is designed. */
+    --background: 210 20% 98%;
+    --foreground: 222 25% 12%;
+    --card: 0 0% 100%;
+    --card-foreground: 222 25% 12%;
+    --popover: 0 0% 100%;
+    --popover-foreground: 222 25% 12%;
+    --primary: 199 80% 42%;
+    --primary-foreground: 0 0% 100%;
+    --secondary: 214 18% 93%;
+    --secondary-foreground: 222 25% 20%;
+    --muted: 214 18% 94%;
+    --muted-foreground: 215 14% 42%;
+    --accent: 214 20% 92%;
+    --accent-foreground: 222 25% 16%;
+    --destructive: 0 70% 48%;
+    --destructive-foreground: 0 0% 100%;
+    --border: 214 16% 87%;
+    --input: 214 16% 88%;
+    --ring: 199 80% 45%;
+
+    --positive: 152 50% 36%;
+    --caution: 38 80% 44%;
+    --negative: 0 68% 50%;
+    --surface-raised: 210 20% 100%;
+
+    --radius: 0.625rem;
+  }
+
+  .dark {
+    /* 11% lightness, faintly blue. Dark enough to read as a dark UI, light
+       enough that text does not halate and that three layers of surface are
+       separable without a border on each. */
+    --background: 222 18% 11%;
+    --foreground: 210 16% 90%;
+
+    /* Cards sit 3 points above the page. That gap is the whole layering system:
+       page -> card -> raised. Any less and the panels disappear; any more and
+       the UI looks like stacked boxes. */
+    --card: 222 16% 14%;
+    --card-foreground: 210 16% 90%;
+    --surface-raised: 220 15% 17%;
+
+    --popover: 222 17% 13%;
+    --popover-foreground: 210 16% 90%;
+
+    /* The single accent. Desaturated well below a "brand cyan" so it reads as
+       interactive rather than decorative, and so the semantic colours below
+       stay the most saturated things on screen. */
+    --primary: 199 72% 56%;
+    --primary-foreground: 222 30% 10%;
+
+    --secondary: 220 14% 20%;
+    --secondary-foreground: 210 16% 88%;
+
+    --muted: 220 14% 18%;
+    /* 60% lightness: comfortably below the foreground but still above the WCAG
+       AA threshold on the card surface. Secondary text that fails contrast is
+       the most common dark-theme mistake and the hardest to notice, because the
+       person who chose it already knows what it says. */
+    --muted-foreground: 215 13% 62%;
+
+    --accent: 220 14% 21%;
+    --accent-foreground: 210 16% 90%;
+
+    --destructive: 0 62% 58%;
+    --destructive-foreground: 210 16% 95%;
+
+    /* Borders are low-contrast on purpose -- they separate, they do not draw.
+       Most separation here comes from surface lightness; borders are for the
+       cases where two surfaces of the same level meet. */
+    --border: 220 12% 22%;
+    --input: 220 12% 24%;
+    --ring: 199 72% 56%;
+
+    /* Semantic trio, balanced for equal perceived weight so a status change does
+       not make a row visually jump. */
+    --positive: 152 45% 52%;
+    --caution: 38 78% 60%;
+    --negative: 0 65% 62%;
+  }
+}
+
+@layer base {
+  * {
+    @apply border-border;
+  }
+
+  body {
+    @apply bg-background text-foreground;
+    font-feature-settings: 'rlig' 1, 'calt' 1;
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+  }
+
+  /* Numbers in tables, counters and timings must not shift width as they
+     change. A live counter ticking 9 -> 10 that nudges everything after it is
+     the sort of small wrongness that makes a UI feel unfinished. */
+  .tabular {
+    font-variant-numeric: tabular-nums;
+  }
+
+  /* The focus ring is deliberately loud. Keyboard users are a minority of
+     sessions and the entire population of people who cannot use this app
+     without it. */
+  :focus-visible {
+    @apply outline-none ring-2 ring-ring ring-offset-2 ring-offset-background;
+  }
+
+  ::selection {
+    background-color: hsl(var(--primary) / 0.28);
+  }
+}
+
+@layer components {
+  /* The scrollbar, restyled because the default light scrollbar on a dark panel
+     is the single most jarring element in a dark UI. */
+  .scroll-slim::-webkit-scrollbar {
+    width: 8px;
+    height: 8px;
+  }
+  .scroll-slim::-webkit-scrollbar-track {
+    background: transparent;
+  }
+  .scroll-slim::-webkit-scrollbar-thumb {
+    background-color: hsl(var(--border));
+    border-radius: 999px;
+  }
+  .scroll-slim::-webkit-scrollbar-thumb:hover {
+    background-color: hsl(var(--muted-foreground) / 0.5);
+  }
+}
+
+@layer utilities {
+  /* A slow pulse for the step that is currently running. Two seconds rather
+     than the Tailwind default's one: this sits on screen for minutes, and a
+     faster pulse becomes something the eye keeps catching. */
+  @keyframes breathe {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.55; }
+  }
+  .animate-breathe {
+    animation: breathe 2s ease-in-out infinite;
+  }
+
+  /* Streaming rows enter rather than appear. The movement is what tells the eye
+     something arrived, which matters on a timeline the user is watching for
+     evidence of progress. */
+  @keyframes slide-in {
+    from { opacity: 0; transform: translateY(4px); }
+    to { opacity: 1; transform: translateY(0); }
+  }
+  .animate-slide-in {
+    animation: slide-in 220ms ease-out;
+  }
+
+  /* Respect the OS setting. Someone who has asked for reduced motion is often
+     asking because motion makes them ill, and a "subtle" animation is not an
+     exception to that. */
+  @media (prefers-reduced-motion: reduce) {
+    .animate-breathe,
+    .animate-slide-in {
+      animation: none;
+    }
+  }
+}

@@ -5,9 +5,7 @@ const nextConfig = {
   // Required by docker/frontend.Dockerfile's runtime stage.
   output: 'standalone',
 
-  experimental: {
-    typedRoutes: true,
-  },
+  typedRoutes: true,
 
   // Proxy API calls to the FastAPI gateway in development so the browser sees a
   // same-origin URL and no CORS preflight is needed.

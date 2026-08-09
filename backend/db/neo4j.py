@@ -90,6 +90,30 @@ _LIVENESS_CHECK_SECONDS = 30.0
 # for us. Mirrors `pool_recycle` in `session.py`.
 _MAX_CONNECTION_LIFETIME_SECONDS = 1800.0
 
+_MAX_TRANSACTION_RETRY_SECONDS = 2.0
+"""How long a *managed* transaction may keep retrying inside the driver.
+
+The default is 30s, and leaving it there made `GET /api/v1/graph/search` take a
+measured 15 seconds to return 503 against an unreachable Neo4j. The cause is that
+retrying happens twice, nested, and the two layers **multiply**: `graph/client.py`
+makes up to three attempts, and each one calls `execute_read`, which runs the
+driver's own exponential ladder (1.1s, 1.7s, 3.7s, 7.1s ...) before giving up.
+Total latency is `client_attempts x driver_window`, not the larger of the two --
+so the client's 15s budget was being spent inside its first attempt.
+
+Two seconds is chosen from that arithmetic: three client attempts times two
+seconds is a six-second worst case, comfortably inside the 15s request budget and
+short enough that a read endpoint fails fast instead of holding a worker. It
+still covers what the driver's retry is genuinely for -- a leader election or a
+reaped connection, both of which resolve in well under a second -- while leaving
+classification, backoff and the give-up decision to the layer that can tell a
+transient failure from a syntax error.
+
+`backend/db/session.py` makes the same split for PostgreSQL: the pool handles
+sockets, the caller handles semantics. The lesson generalises -- whenever two
+layers both retry, measure the product rather than assuming the outer bound wins.
+"""
+
 
 def get_driver() -> AsyncDriver:
     """Return the process-wide async driver, creating it on first use.
@@ -121,6 +145,9 @@ def get_driver() -> AsyncDriver:
                 connection_acquisition_timeout=float(settings.neo4j.connection_timeout_seconds),
                 liveness_check_timeout=_LIVENESS_CHECK_SECONDS,
                 max_connection_lifetime=_MAX_CONNECTION_LIFETIME_SECONDS,
+                # Bounded well below `graph/client.py`'s request budget so the
+                # two retry layers do not nest. See the constant.
+                max_transaction_retry_time=_MAX_TRANSACTION_RETRY_SECONDS,
             )
         except Neo4jConfigurationError as exc:
             # Almost always `NEO4J_URI` pointing at the HTTP port (7474) or at

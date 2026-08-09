@@ -15,7 +15,16 @@ from __future__ import annotations
 
 from fastapi import APIRouter
 
-from backend.api.v1 import graph, health
+from backend.api.v1 import (
+    agents,
+    connectors,
+    graph,
+    health,
+    investigations,
+    reports,
+    signals,
+    stream,
+)
 
 __all__ = ["API_V1_PREFIX", "api_router"]
 
@@ -33,13 +42,18 @@ v1 = APIRouter(prefix=API_V1_PREFIX)
 # reachable by being saved to disk -- the same reasoning as the explicit
 # connector registration in `connectors/__init__.py`.
 #
+# Order matters for one pair only: `stream` declares
+# `/investigations/{id}/stream` and `investigations` declares
+# `/investigations/{id}`. Starlette matches in registration order, and the
+# streaming path is more specific, so it is mounted first -- otherwise
+# `/investigations/{investigation_id}` would capture `abc/stream` on some path
+# shapes and answer a stream request with a JSON detail body.
+v1.include_router(stream.router)
+v1.include_router(investigations.router)
+v1.include_router(signals.router)
+v1.include_router(reports.router)
 v1.include_router(graph.router)
-
-#   v1.include_router(investigations.router)
-#   v1.include_router(connectors.router)
-#   v1.include_router(reports.router)
-#   v1.include_router(agents.router)
-#   v1.include_router(signals.router)
-#   v1.include_router(stream.router)
+v1.include_router(connectors.router)
+v1.include_router(agents.router)
 
 api_router.include_router(v1)
