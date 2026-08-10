@@ -304,9 +304,9 @@ def _params_in(cypher: str) -> set[str]:
 
 
 ALL_BUILDERS = [
-    lambda: q.competitors_of(tenant_id="t", name="Acme"),
-    lambda: q.complaint_topics_for_product(tenant_id="t", product="Widget"),
-    lambda: q.acquisition_chain(tenant_id="t", company_id="c1"),
+    lambda: q.entity_neighbours(tenant_id="t", entity_id="e"),
+    lambda: q.paths_between(tenant_id="t", source_id="a", target_id="b"),
+    lambda: q.subgraph_edges(tenant_id="t", entity_ids=["a", "b"]),
     lambda: q.neighbourhood_signals(
         tenant_id="t", seed_ids=["a"], start=NOW - timedelta(days=1), end=NOW
     ),
@@ -342,9 +342,9 @@ class TestTemplateInvariants:
         sentinel = "TENANT_SENTINEL_ZZZ"
         needle = "NAME_SENTINEL_ZZZ"
         builders = [
-            lambda: q.competitors_of(tenant_id=sentinel, name=needle),
-            lambda: q.complaint_topics_for_product(tenant_id=sentinel, product=needle),
-            lambda: q.acquisition_chain(tenant_id=sentinel, company_id=needle),
+            lambda: q.entity_neighbours(tenant_id=sentinel, entity_id=needle),
+            lambda: q.paths_between(tenant_id=sentinel, source_id=needle, target_id=needle),
+            lambda: q.subgraph_edges(tenant_id=sentinel, entity_ids=[needle]),
             lambda: q.neighbourhood_signals(
                 tenant_id=sentinel,
                 seed_ids=[needle],
@@ -405,7 +405,9 @@ class TestTemplateGuards:
     def test_hop_bound_above_the_ceiling_is_rejected(self) -> None:
         """Path count grows with branching raised to the depth."""
         with pytest.raises(GraphSchemaError, match="max_hops"):
-            q.acquisition_chain(tenant_id="t", company_id="c", max_hops=q.MAX_HOPS + 1)
+            q.paths_between(
+                tenant_id="t", source_id="a", target_id="b", max_hops=q.MAX_HOPS + 1
+            )
 
     def test_unknown_entity_type_cannot_be_a_search_filter(self) -> None:
         """`EntityType` is tolerant on read -- `EntityType('Spaceship')` yields
@@ -430,52 +432,52 @@ class TestTemplateGuards:
         """A naive value would compare a local wall clock against stored UTC and
         be wrong by the server's offset -- silently, and only outside UTC."""
         with pytest.raises(Exception):
-            q.competitors_of(tenant_id="t", name="Acme", as_of=datetime(2026, 8, 6))
+            q.entity_neighbours(tenant_id="t", entity_id="e", as_of=datetime(2026, 8, 6))
 
 
 class TestTemplateSemantics:
-    def test_competitor_traversal_is_undirected(self) -> None:
-        """The edge is stored once in canonical orientation. A directed match
-        returns roughly half the rivals, and which half depends on the lexical
-        accident of two uuids -- so it looks like sparse data, not a bug."""
-        cypher = q.competitors_of(tenant_id="t", name="Acme").cypher
-        assert "-[r:COMPETES_WITH]-(" in cypher
-        assert "->(rival)" not in cypher
+    def test_relationship_traversal_is_undirected(self) -> None:
+        """Every edge is stored once, in one canonical orientation.
 
-    def test_confidence_filter_tolerates_a_missing_confidence(self) -> None:
-        """`null >= 0.0` is null, so a bare comparison drops every edge that
-        never carried a confidence -- which is most rule-extracted edges."""
-        assert "coalesce(r.confidence, 0.0) >= $min_confidence" in (
-            q.competitors_of(tenant_id="t", name="Acme").cypher
-        )
+        A directed match therefore returns roughly half the neighbours, and which
+        half depends on the lexical accident of two uuids -- so the result looks
+        like sparse data rather than like a bug, and nothing raises.
+        """
+        for cypher in (
+            q.entity_neighbours(tenant_id="t", entity_id="e").cypher,
+            q.subgraph_edges(tenant_id="t", entity_ids=["e"]).cypher,
+            q.paths_between(tenant_id="t", source_id="a", target_id="b").cypher,
+        ):
+            assert "]-(" in cypher
+            assert "]->(" not in cypher
 
-    def test_complaint_window_uses_observed_at_not_valid_from(self) -> None:
-        """'Complaints in the last 30 days' means recently *reported*. Conflating
-        the axes is the most common temporal bug in this layer."""
-        cypher = q.complaint_topics_for_product(tenant_id="t", product="W").cypher
-        assert "c.observed_at >=" in cypher
-        assert "c.valid_from" not in cypher
+    def test_confidence_ranking_tolerates_a_missing_confidence(self) -> None:
+        """A bare `ORDER BY r.confidence` puts unscored edges wherever the server
+        sorts nulls, which is not the same end in every clause it appears.
 
-    def test_complaint_window_boundary_is_a_parameter(self) -> None:
-        """Server-clock arithmetic in the query means two calls a millisecond
-        apart read different windows, so a paginated result drops or repeats
-        rows across pages."""
-        cypher = q.complaint_topics_for_product(tenant_id="t", product="W").cypher
+        Most rule-extracted edges carry no confidence at all, so this decides
+        where the bulk of the graph lands in a `LIMIT`-ed read. `coalesce` makes
+        an unscored edge the weakest rather than the arbitrary one.
+        """
+        for cypher in (
+            q.entity_neighbours(tenant_id="t", entity_id="e").cypher,
+            q.subgraph_edges(tenant_id="t", entity_ids=["e"]).cypher,
+        ):
+            assert "coalesce(r.confidence, 0.0) DESC" in cypher
+
+    def test_a_window_boundary_is_a_parameter_not_server_clock_arithmetic(self) -> None:
+        """`duration()` in the query text means two calls a millisecond apart read
+        different windows, so a paginated result drops or repeats rows between
+        pages -- with no error and no way to notice from the output."""
+        cypher = q.topic_activity(
+            tenant_id="t", since=NOW - timedelta(days=7), until=NOW
+        ).cypher
         assert "duration(" not in cypher
 
-    def test_complaint_window_is_injectable_for_tests(self) -> None:
-        query = q.complaint_topics_for_product(
-            tenant_id="t", product="W", window_days=7, now=NOW
-        )
+    def test_a_window_is_injectable_rather_than_read_from_the_clock(self) -> None:
+        query = q.topic_activity(tenant_id="t", since=NOW - timedelta(days=7), until=NOW)
         assert query.parameters["until"] == NOW
         assert query.parameters["since"] == NOW - timedelta(days=7)
-
-    def test_acquisition_chain_follows_only_closed_deals(self) -> None:
-        """Traversing a rumour produces an ownership chain for a transaction that
-        may never happen, and it reaches a report as a statement of fact."""
-        assert "rel.status = 'closed'" in q.acquisition_chain(
-            tenant_id="t", company_id="c"
-        ).cypher
 
     def test_neighbourhood_excludes_bookkeeping_edges(self) -> None:
         """Walking SAME_AS makes the expansion traverse a node's own merge
@@ -541,4 +543,4 @@ class TestTemplateSemantics:
         returned by one and not the other."""
         from graph.temporal.validity import as_of_cypher
 
-        assert as_of_cypher("r") in q.competitors_of(tenant_id="t", name="A").cypher
+        assert as_of_cypher("r") in q.entity_neighbours(tenant_id="t", entity_id="e").cypher

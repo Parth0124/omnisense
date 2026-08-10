@@ -192,34 +192,6 @@ GOLDEN_CASES: Final[tuple[GoldenCase, ...]] = (
         query="Acme battery complaints and Acme battery praise",
         expected=_E(custom={"no_duplicate_signal_chunk_pairs": True}),
     ),
-    # ------------------------------------------------------------------ Trend
-    GoldenCase(
-        id="trend.refuses_direction_on_two_points",
-        agent=AgentName.TREND,
-        kind=CaseKind.CAPABILITY,
-        description="A two-observation series yields no rising/falling claim.",
-        rationale=(
-            "Two points are a line, not a trend. 'Mentions doubled' from two "
-            "observations is technically true, reads as a finding, and is noise."
-        ),
-        query="How are battery complaints trending?",
-        expected=_E(custom={"no_direction_below_three_observations": True}),
-        state_overrides={"_series_length": 2},
-    ),
-    GoldenCase(
-        id="trend.calls_a_flat_series_stable",
-        agent=AgentName.TREND,
-        kind=CaseKind.ADVERSARIAL,
-        description="A wobbling series is not described as rising.",
-        rationale=(
-            "'Rising' sounds like a finding and 'stable' does not, so a model "
-            "handed noise will reach for the former. This is the case the "
-            "post-hoc verification in TrendAgent exists to catch."
-        ),
-        query="How are mentions trending?",
-        expected=_E(custom={"direction_in": ["stable", "volatile"]}),
-        state_overrides={"_series": [10.0, 10.4, 9.8, 10.1]},
-    ),
     # ---------------------------------------------------------------- Insight
     GoldenCase(
         id="insight.refuses_without_evidence",

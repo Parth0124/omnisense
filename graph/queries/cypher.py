@@ -29,12 +29,14 @@ because the test Neo4j had the plugin. The default is pure Cypher; the APOC form
 is behind an explicit flag. Same reasoning as
 `graph/schema/nodes.list_union_expression()`.
 
-**On `coalesce` around confidence filters.** `r.confidence >= $min` is
-three-valued: an edge whose `confidence` was never set compares `null >= 0.0`,
-which is `null`, which fails the `WHERE`. A caller passing `min_confidence=0.0`
-means "no minimum" and would get "only edges that carry a confidence", silently
-losing every rule-extracted edge. The templates use `coalesce(r.confidence, 0.0)`
-so the filter means what it says.
+**On `coalesce` around confidence.** Comparing a confidence is three-valued: an
+edge whose `confidence` was never set compares `null >= 0.0` as `null`, and most
+rule-extracted edges never carried one. No template filters on confidence today
+-- the ones that did went with the market traversals -- but every template that
+*ranks* by it writes `coalesce(r.confidence, 0.0)`, so an unscored edge sorts as
+the weakest rather than at whichever end the server happens to put nulls. Any
+filter added later must do the same, or `min_confidence=0.0` will mean "only
+edges that carry a confidence" instead of "no minimum".
 
 Layer note: **L1 library** -- `models/` plus the rest of `graph/`. No driver
 import and no kernel import; this module builds strings and dicts and executes
@@ -44,15 +46,14 @@ nothing. `graph/client.py` runs them.
 from __future__ import annotations
 
 from collections.abc import Sequence
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from typing import Any, Final, NamedTuple
-
-from models.enums import EdgeType, EntityType
 
 from graph.schema.constraints import FULLTEXT_INDEX_NAME
 from graph.schema.edges import SIGNAL_LABEL, edge_spec
 from graph.schema.nodes import GraphSchemaError, entity_labels, node_spec, validate_label
 from graph.temporal.validity import AS_OF_PARAM, as_of_cypher, coerce_instant
+from models.enums import EdgeType, EntityType
 
 __all__ = [
     "DEFAULT_FANOUT_CAP",
@@ -61,9 +62,6 @@ __all__ = [
     "MAX_LIMIT",
     "TRAVERSABLE_EDGE_TYPES",
     "Query",
-    "acquisition_chain",
-    "competitors_of",
-    "complaint_topics_for_product",
     "entity_by_id",
     "entity_neighbours",
     "entity_search",
@@ -240,78 +238,6 @@ def _label_filter(entity_types: Sequence[EntityType] | None) -> list[str] | None
 # --------------------------------------------------------------------------- #
 
 
-def competitors_of(
-    *,
-    tenant_id: str,
-    name: str,
-    as_of: datetime | None = None,
-    min_confidence: float = 0.0,
-    min_strength: float = 0.0,
-    limit: int = DEFAULT_LIMIT,
-) -> Query:
-    """Rivals of a company or product, valid at an instant.
-
-    Matches the subject by `canonical_name` **or** membership in `aliases`, which
-    is what lets "Big Blue" find IBM without the caller resolving the name first.
-    That `OR` does cost the `canonical_name` index -- a disjunction over a scalar
-    and a list property cannot be served by one index seek -- and it is worth it,
-    because a competitor query that only matches the canonical spelling fails on
-    exactly the inputs a human types.
-
-    The `-[r:COMPETES_WITH]-` is undirected on purpose and it is not optional:
-    `graph/schema/edges.py` stores the edge exactly once, in canonical
-    orientation (`from_id < to_id`). A directed match returns roughly half the
-    rivals, and *which* half depends on the lexical accident of two uuids -- so
-    the bug presents as sparse data rather than as a bug.
-
-    `rival <> c` excludes a self-loop. Nothing should ever write one, but a
-    resolution merge that unified two nodes which competed with each other
-    produces one, and a company listed as its own competitor in a board report is
-    a memorable way to discover that.
-    """
-    _require_tenant(tenant_id)
-    _require_text(name, "name")
-    _require_limit(limit)
-
-    cypher = f"""
-MATCH (c)
-WHERE (c:Company OR c:Product)
-  AND c.tenant_id = $tenant_id
-  AND (c.canonical_name = $name OR $name IN coalesce(c.aliases, []))
-MATCH (c)-[r:COMPETES_WITH]-(rival)
-WHERE {as_of_cypher("r")}
-  AND coalesce(r.confidence, 0.0) >= $min_confidence
-  AND coalesce(r.strength, 0.0) >= $min_strength
-  AND rival.tenant_id = $tenant_id
-  AND rival <> c
-RETURN rival.id             AS id,
-       rival.canonical_name AS name,
-       labels(rival)[0]     AS type,
-       r.strength           AS strength,
-       r.basis              AS basis,
-       r.market             AS market,
-       r.confidence         AS confidence,
-       r.evidence_count     AS evidence_count,
-       r.valid_from         AS valid_from,
-       r.valid_to           AS valid_to,
-       coalesce(r.source_signal_ids, [])[..5] AS citations
-ORDER BY coalesce(r.strength, 0.0) DESC,
-         coalesce(r.evidence_count, 0) DESC,
-         id ASC
-LIMIT $limit
-""".strip()
-
-    return Query(
-        cypher,
-        {
-            "tenant_id": tenant_id,
-            "name": name,
-            AS_OF_PARAM: _instant(as_of, name="as_of"),
-            "min_confidence": float(min_confidence),
-            "min_strength": float(min_strength),
-            "limit": limit,
-        },
-    )
 
 
 # --------------------------------------------------------------------------- #
@@ -319,67 +245,6 @@ LIMIT $limit
 # --------------------------------------------------------------------------- #
 
 
-def complaint_topics_for_product(
-    *,
-    tenant_id: str,
-    product: str,
-    window_days: int = 30,
-    min_salience: float = 0.3,
-    limit: int = 10,
-    now: datetime | None = None,
-) -> Query:
-    """Topics driving complaints about a product, over a recent window.
-
-    Filters on `observed_at`, **not** `valid_from`, and the distinction is the
-    entire point of the bitemporal model. "Complaints in the last 30 days" means
-    complaints we *learned about* in the last 30 days; `valid_from` would mean
-    complaints that *became true* then, which for a backfilled archive is a
-    different set and usually a much smaller one.
-
-    The window boundary is computed here and passed as a parameter rather than
-    written as `datetime() - duration({days: 30})` in the query text. Server-clock
-    arithmetic inside a query means two calls a millisecond apart read different
-    windows, so a paginated result can drop or repeat a row across pages -- and a
-    test cannot pin the boundary at all, which is why `now` is injectable.
-    """
-    _require_tenant(tenant_id)
-    _require_text(product, "product")
-    _require_limit(limit)
-    if not isinstance(window_days, int) or isinstance(window_days, bool) or window_days < 1:
-        raise GraphSchemaError(f"window_days must be a positive int, got {window_days!r}")
-
-    until = _instant(now, name="now")
-    since = until - timedelta(days=window_days)
-
-    cypher = f"""
-MATCH (p:Product {{tenant_id: $tenant_id}})
-WHERE p.canonical_name = $product OR $product IN coalesce(p.aliases, [])
-MATCH (s:{SIGNAL_LABEL})-[c:COMPLAINS_ABOUT]->(p)
-WHERE c.observed_at >= $since AND c.observed_at < $until
-MATCH (s)-[m:MENTIONS]->(t:Topic)
-WHERE coalesce(m.salience, 0.0) >= $min_salience
-  AND t.tenant_id = $tenant_id
-RETURN t.id                         AS topic_id,
-       t.canonical_name             AS topic,
-       count(DISTINCT s)            AS complaints,
-       avg(c.severity)              AS avg_severity,
-       avg(c.sentiment)             AS avg_sentiment,
-       collect(DISTINCT s.id)[..10] AS example_signals
-ORDER BY complaints DESC, topic ASC
-LIMIT $limit
-""".strip()
-
-    return Query(
-        cypher,
-        {
-            "tenant_id": tenant_id,
-            "product": product,
-            "since": since,
-            "until": until,
-            "min_salience": float(min_salience),
-            "limit": limit,
-        },
-    )
 
 
 # --------------------------------------------------------------------------- #
@@ -387,65 +252,6 @@ LIMIT $limit
 # --------------------------------------------------------------------------- #
 
 
-def acquisition_chain(
-    *,
-    tenant_id: str,
-    company_id: str,
-    as_of: datetime | None = None,
-    max_hops: int = MAX_HOPS,
-) -> Query:
-    """Who ultimately owns a company, following only *closed* acquisitions.
-
-    `status = 'closed'` on every hop is the load-bearing filter. `ACQUIRED`
-    records rumoured and announced deals too, because a rumour is intelligence
-    worth having -- but traversing one produces an ownership chain for a
-    transaction that may never happen, and that reaches a report as a statement
-    of fact about who owns whom.
-
-    The `NOT EXISTS` anchors the path at a company nobody closed an acquisition
-    of, i.e. the top of the chain. Without it, every prefix of the chain is also
-    a match and the result is n paths where one was wanted.
-
-    `ORDER BY hops DESC LIMIT 1` takes the longest chain, which is the correct
-    tie-break: if A→B→C and B→C both match, the three-node chain is the fuller
-    answer and the two-node one is its suffix.
-
-    The hop bound is interpolated -- Cypher cannot parameterise the bounds of a
-    variable-length pattern -- and is therefore range-checked as an int first.
-    """
-    _require_tenant(tenant_id)
-    _require_text(company_id, "company_id")
-    if not isinstance(max_hops, int) or isinstance(max_hops, bool):
-        raise GraphSchemaError(f"max_hops must be an int, got {type(max_hops).__name__}")
-    if not 1 <= max_hops <= MAX_HOPS:
-        raise GraphSchemaError(f"max_hops must be between 1 and {MAX_HOPS}, got {max_hops}")
-
-    cypher = f"""
-MATCH (target:Company {{id: $company_id, tenant_id: $tenant_id}})
-MATCH path = (root:Company)-[rels:ACQUIRED*1..{max_hops}]->(target)
-WHERE ALL(rel IN rels WHERE rel.status = 'closed'
-      AND {as_of_cypher("rel")})
-  AND root.tenant_id = $tenant_id
-  AND NOT EXISTS {{
-        MATCH (:Company)-[r2:ACQUIRED]->(root)
-        WHERE r2.status = 'closed'
-          AND {as_of_cypher("r2")}
-      }}
-RETURN [n IN nodes(path) | n.id]             AS chain_ids,
-       [n IN nodes(path) | n.canonical_name] AS ownership_chain,
-       length(path)                          AS hops
-ORDER BY hops DESC, chain_ids[0] ASC
-LIMIT 1
-""".strip()
-
-    return Query(
-        cypher,
-        {
-            "tenant_id": tenant_id,
-            "company_id": company_id,
-            AS_OF_PARAM: _instant(as_of, name="as_of"),
-        },
-    )
 
 
 # --------------------------------------------------------------------------- #

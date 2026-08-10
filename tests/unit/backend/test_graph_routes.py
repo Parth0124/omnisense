@@ -167,67 +167,6 @@ class TestEntityDetail:
         assert body["analytics_are_stale"] is True
 
 
-class TestCompetitors:
-    ROW = {
-        "id": "c1",
-        "name": "Globex",
-        "type": "Company",
-        "strength": 0.8,
-        "basis": "stated",
-        "evidence_count": 4,
-        "citations": ["sig_1"],
-    }
-
-    async def test_returns_rivals(self) -> None:
-        async with _client(_service_returning([self.ROW])) as client:
-            body = (await client.get("/api/v1/graph/entities/Acme/competitors")).json()
-        assert body["results"][0]["name"] == "Globex"
-        assert body["results"][0]["basis"] == "stated"
-
-    async def test_as_of_is_echoed_back(self) -> None:
-        """It defaults to now on the server, so a client that omitted it cannot
-        otherwise reproduce the result."""
-        async with _client(_service_returning([])) as client:
-            body = (await client.get("/api/v1/graph/entities/Acme/competitors")).json()
-        assert body["as_of"]
-
-    async def test_a_naive_as_of_is_rejected(self) -> None:
-        """It would be compared against UTC values in Neo4j and be silently wrong
-        by the server's offset."""
-        async with _client(_service_returning([])) as client:
-            response = await client.get(
-                "/api/v1/graph/entities/Acme/competitors?as_of=2026-08-06T00:00:00"
-            )
-        assert response.status_code == 422
-
-    async def test_an_unrecognised_basis_does_not_500_the_response(self) -> None:
-        """One odd edge must not fail the whole payload."""
-        async with _client(_service_returning([{**self.ROW, "basis": "vibes"}])) as client:
-            body = (await client.get("/api/v1/graph/entities/Acme/competitors")).json()
-        assert body["results"][0]["basis"] == "unknown"
-
-    async def test_null_strength_survives_serialisation(self) -> None:
-        """None means 'nobody assessed it'; 0.0 means 'assessed and negligible'."""
-        async with _client(_service_returning([{**self.ROW, "strength": None}])) as client:
-            body = (await client.get("/api/v1/graph/entities/Acme/competitors")).json()
-        assert body["results"][0]["strength"] is None
-
-
-class TestOwnership:
-    async def test_independent_company_is_stated_explicitly(self) -> None:
-        async with _client(_service_returning([])) as client:
-            body = (await client.get("/api/v1/graph/companies/c1/ownership")).json()
-        assert body["is_independent"] is True
-        assert body["chain"] == []
-
-    async def test_a_chain_names_the_root_first(self) -> None:
-        row = {"chain_ids": ["p", "c"], "ownership_chain": ["Parent", "Child"], "hops": 1}
-        async with _client(_service_returning([row])) as client:
-            body = (await client.get("/api/v1/graph/companies/c/ownership")).json()
-        assert body["names"][0] == "Parent"
-        assert body["is_independent"] is False
-
-
 class TestPaths:
     async def test_reports_connected_false_when_there_is_no_path(self) -> None:
         async with _client(_service_returning([])) as client:

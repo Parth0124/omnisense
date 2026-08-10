@@ -18,11 +18,8 @@ import pytest
 
 from agents.collector.agent import CollectorAgent
 from agents.collector.schemas import CollectionRequest, CollectorOutput
-from agents.competitor.agent import CompetitorAgent
-from agents.competitor.schemas import CompetitiveBasis, CompetitorFinding
-from agents.critic.agent import SOURCE_CONCENTRATION_THRESHOLD, CriticAgent
+from agents.critic.agent import CriticAgent
 from agents.critic.schemas import CriticOutput, Finding, FindingKind, Severity
-from agents.forecast.agent import ForecastAgent
 from agents.insight.agent import InsightAgent
 from agents.insight.schemas import Insight, InsightKind, InsightOutput
 from agents.planner.agent import PlannerAgent
@@ -40,8 +37,6 @@ from agents.state import EvidenceRef, PlanStep, SubQuestion, new_state
 from agents.strategy.agent import StrategyAgent
 from agents.strategy.schemas import Horizon, Recommendation, StrategyOutput, Urgency
 from agents.tools.registry import AGENT_TOOL_ALLOWLIST
-from agents.trend.agent import TrendAgent
-from agents.trend.schemas import DetectedTrend, TrendDirection
 from models.enums import AgentName, InvestigationStatus
 
 pytestmark = pytest.mark.unit
@@ -52,9 +47,6 @@ ALL_AGENTS = [
     PlannerAgent,
     CollectorAgent,
     RetrieverAgent,
-    TrendAgent,
-    CompetitorAgent,
-    ForecastAgent,
     InsightAgent,
     StrategyAgent,
     CriticAgent,
@@ -127,7 +119,7 @@ class TestPlanner:
         """The model's type and the state's type are separate, so a field added
         to the state for bookkeeping does not become prompt-settable."""
         output = PlannerOutput(
-            objective="o", steps=[PlannedStep(id="s1", description="d", agent=AgentName.TREND)]
+            objective="o", steps=[PlannedStep(id="s1", description="d", agent=AgentName.INSIGHT)]
         )
         delta = _bare(PlannerAgent).to_delta(output, _state())
         assert type(delta["plan"][0]) is PlanStep
@@ -141,7 +133,7 @@ class TestCollector:
             plan=[
                 PlanStep(id="a", description="fresh", agent=AgentName.COLLECTOR,
                          requires_fresh_data=True),
-                PlanStep(id="b", description="stale", agent=AgentName.TREND),
+                PlanStep(id="b", description="stale", agent=AgentName.INSIGHT),
             ]
         )
         assert _bare(CollectorAgent).build_input(state).fresh_data_steps == ["fresh"]
@@ -199,110 +191,6 @@ class TestRetriever:
         from agents.retriever.schemas import RetrieverOutput
 
         assert RetrieverOutput(degraded_backends=["vector"]).is_degraded
-
-
-class TestTrend:
-    def test_two_points_cannot_be_a_direction(self) -> None:
-        with pytest.raises(Exception, match="observations"):
-            DetectedTrend(
-                topic="t", direction=TrendDirection.RISING, observation_count=2, summary="s"
-            )
-
-    def test_volatile_is_allowed_on_a_short_series(self) -> None:
-        """Volatility is itself a statement that the series is too noisy to
-        call, so the count floor does not apply."""
-        assert DetectedTrend(
-            topic="t", direction=TrendDirection.VOLATILE, observation_count=2, summary="s"
-        )
-
-    def test_a_claimed_rise_on_a_flat_series_is_corrected(self) -> None:
-        """The check that matters: a model handed a wobble will call it rising,
-        because rising sounds like a finding."""
-        agent = _bare(TrendAgent)
-        series = [{"subject": "battery", "points": [(1, 10.0), (2, 10.4), (3, 9.8), (4, 10.1)]}]
-        claimed = DetectedTrend(
-            topic="battery", direction=TrendDirection.RISING, observation_count=4,
-            summary="up", confidence=0.9,
-        )
-        fixed = agent._verify_against_series(claimed, series)
-        assert fixed.direction is TrendDirection.STABLE
-        assert fixed.confidence == pytest.approx(0.45)
-
-    def test_a_real_rise_survives_intact(self) -> None:
-        agent = _bare(TrendAgent)
-        series = [{"subject": "battery", "points": [(1, 10.0), (2, 14.0), (3, 18.0)]}]
-        claimed = DetectedTrend(
-            topic="battery", direction=TrendDirection.RISING, observation_count=3,
-            summary="up", confidence=0.9,
-        )
-        kept = agent._verify_against_series(claimed, series)
-        assert kept.direction is TrendDirection.RISING
-        assert kept.confidence == 0.9
-        assert kept.change_pct == pytest.approx(80.0)
-
-    def test_a_trend_about_an_unmeasured_subject_is_dropped(self) -> None:
-        """A fabricated subject is not recoverable by softening the direction."""
-        agent = _bare(TrendAgent)
-        series = [{"subject": "battery", "points": [(1, 1.0), (2, 2.0), (3, 3.0)]}]
-        invented = DetectedTrend(
-            topic="moon phases", direction=TrendDirection.STABLE, summary="s"
-        )
-        assert agent._verify_against_series(invented, series) is None
-
-    def test_a_zero_baseline_yields_no_percentage(self) -> None:
-        """'Up 400%' from one prior mention is arithmetically true and
-        substantively meaningless."""
-        agent = _bare(TrendAgent)
-        series = [{"subject": "battery", "points": [(1, 0.0), (2, 3.0), (3, 5.0)]}]
-        claimed = DetectedTrend(
-            topic="battery", direction=TrendDirection.RISING, observation_count=3, summary="s"
-        )
-        assert agent._verify_against_series(claimed, series).change_pct is None
-
-
-class TestCompetitor:
-    def test_a_stated_rivalry_needs_a_source(self) -> None:
-        """`stated` licenses an unhedged sentence; without a citation it is an
-        inference wearing the label."""
-        with pytest.raises(Exception, match="stated"):
-            CompetitorFinding(name="Globex", basis=CompetitiveBasis.STATED)
-
-    def test_an_inference_needs_none(self) -> None:
-        assert CompetitorFinding(name="Globex", basis=CompetitiveBasis.INFERRED)
-
-    def test_merge_keeps_the_strongest_basis_and_unions_citations(self) -> None:
-        """One row per company. Listing Globex twice because it came from two
-        sources is false corroboration arriving through a different door."""
-        agent = _bare(CompetitorAgent)
-        merged = agent._merge(
-            [CompetitorFinding(name="Globex", basis=CompetitiveBasis.GRAPH, strength=0.4)],
-            [
-                CompetitorFinding(
-                    name="globex", basis=CompetitiveBasis.STATED, signal_ids=["sig_1"],
-                    strength=0.9,
-                )
-            ],
-        )
-        assert len(merged) == 1
-        assert merged[0].basis is CompetitiveBasis.STATED
-        assert merged[0].strength == 0.9
-        assert "sig_1" in merged[0].signal_ids
-
-
-class TestForecast:
-    def test_subjects_come_from_measured_trends(self) -> None:
-        """A subject the Trend agent could not measure has no series, so
-        forecasting it means fitting to nothing."""
-        state = _state(trends=[{"topic": "battery complaints"}, {"topic": "battery complaints"}])
-        assert _bare(ForecastAgent).build_input(state).subjects == ["battery complaints"]
-
-    def test_the_narrative_schema_cannot_carry_a_number(self) -> None:
-        """A stronger control than a prompt asking the model not to: there is
-        nowhere to put one."""
-        from agents.forecast.agent import ForecastNarrative
-
-        assert "points" not in ForecastNarrative.model_fields
-        assert "value" not in ForecastNarrative.model_fields
 
 
 class TestInsight:

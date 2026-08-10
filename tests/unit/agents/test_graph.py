@@ -92,9 +92,7 @@ class ScriptedRequest(BaseModel):
 
     query: str
     evidence_count: int = 0
-    trend_count: int = 0
-    has_competitor_view: bool = False
-    forecast_count: int = 0
+    insight_count: int = 0
 
 
 class ScriptedOutput(BaseModel):
@@ -175,9 +173,7 @@ class ScriptedAgent(BaseAgent[ScriptedRequest, ScriptedOutput], abstract=True):
         return ScriptedRequest(
             query=state.get("query", ""),
             evidence_count=len(state.get("evidence", [])),
-            trend_count=len(state.get("trends", [])),
-            has_competitor_view=state.get("competitor_view") is not None,
-            forecast_count=len(state.get("forecasts", [])),
+            insight_count=len(state.get("insights", [])),
         )
 
     async def execute(self, request: ScriptedRequest, ctx: Any) -> ScriptedOutput:
@@ -216,9 +212,6 @@ def agent_for(
         NodeName.COLLECTOR: AgentName.COLLECTOR,
         NodeName.RETRIEVER: AgentName.RETRIEVER,
         NodeName.GRAPH_EXPANSION: AgentName.RETRIEVER,
-        NodeName.TREND: AgentName.TREND,
-        NodeName.COMPETITOR: AgentName.COMPETITOR,
-        NodeName.FORECAST: AgentName.FORECAST,
         NodeName.INSIGHT: AgentName.INSIGHT,
         NodeName.STRATEGY: AgentName.STRATEGY,
         NodeName.CRITIC: AgentName.CRITIC,
@@ -253,9 +246,6 @@ def build(
             "objective": "understand the shift",
             "plan": plan if plan is not None else [],
         },
-        NodeName.TREND: {"trends": [{"name": "ai-agents", "velocity": 1.4}]},
-        NodeName.COMPETITOR: {"competitor_view": {"focal": "acme"}},
-        NodeName.FORECAST: {"forecasts": [{"horizon": "P30D"}]},
         NodeName.INSIGHT: {"insights": [{"statement": "because"}]},
         NodeName.STRATEGY: {"recommendations": [{"action": "do the thing"}]},
         NodeName.CRITIC: {"critique": verdict},
@@ -339,12 +329,7 @@ def test_the_spec_edges_all_exist() -> None:
         (str(NodeName.PLANNER), str(NodeName.RETRIEVER)),
         (str(NodeName.COLLECTOR), str(NodeName.RETRIEVER)),
         (str(NodeName.RETRIEVER), str(NodeName.GRAPH_EXPANSION)),
-        (str(NodeName.GRAPH_EXPANSION), str(NodeName.TREND)),
-        (str(NodeName.GRAPH_EXPANSION), str(NodeName.COMPETITOR)),
-        (str(NodeName.GRAPH_EXPANSION), str(NodeName.FORECAST)),
-        (str(NodeName.TREND), str(NodeName.INSIGHT)),
-        (str(NodeName.COMPETITOR), str(NodeName.INSIGHT)),
-        (str(NodeName.FORECAST), str(NodeName.INSIGHT)),
+        (str(NodeName.GRAPH_EXPANSION), str(NodeName.INSIGHT)),
         (str(NodeName.INSIGHT), str(NodeName.STRATEGY)),
         (str(NodeName.STRATEGY), str(NodeName.CRITIC)),
         (str(NodeName.CRITIC), str(NodeName.REPORT)),
@@ -367,12 +352,11 @@ def test_a_missing_node_is_refused_rather_than_stubbed() -> None:
 
 async def test_the_happy_path_visits_the_spec_order() -> None:
     journal: list[str] = []
-    graph = build(journal, plan=analysis_plan(AgentName.TREND, AgentName.COMPETITOR))
+    graph = build(journal, plan=analysis_plan(AgentName.INSIGHT, AgentName.STRATEGY))
 
     final = await graph.ainvoke(entry_state())
 
-    spine = [step for step in journal if step not in {str(AgentName.TREND), "competitor"}]
-    assert spine == [
+    assert journal == [
         str(AgentName.PLANNER),
         str(AgentName.RETRIEVER),  # graph expansion is bound to the retriever identity
         str(AgentName.RETRIEVER),
@@ -388,7 +372,7 @@ async def test_the_happy_path_visits_the_spec_order() -> None:
 
 async def test_the_collector_runs_only_when_the_plan_asks_for_fresh_data() -> None:
     stale: list[str] = []
-    await build(stale, plan=analysis_plan(AgentName.TREND)).ainvoke(entry_state())
+    await build(stale, plan=analysis_plan(AgentName.INSIGHT)).ainvoke(entry_state())
     assert str(AgentName.COLLECTOR) not in stale
 
     fresh: list[str] = []
@@ -399,75 +383,26 @@ async def test_the_collector_runs_only_when_the_plan_asks_for_fresh_data() -> No
     assert str(AgentName.COLLECTOR) in fresh
 
 
-async def test_only_the_branches_named_in_the_plan_are_dispatched() -> None:
-    journal: list[str] = []
-    graph = build(journal, plan=analysis_plan(AgentName.TREND))
+async def test_the_graph_is_linear_while_no_branches_are_registered() -> None:
+    """Graph Expansion joins straight to Insight, whatever the plan names.
 
-    final = await graph.ainvoke(entry_state())
-
-    assert str(AgentName.TREND) in journal
-    assert str(AgentName.COMPETITOR) not in journal
-    assert str(AgentName.FORECAST) not in journal
-    assert final["competitor_view"] is None
-
-
-async def test_the_join_waits_for_every_dispatched_branch() -> None:
-    """Insight must see all three slices, not whichever landed first."""
-    journal: list[str] = []
-    insight = agent_for(NodeName.INSIGHT, journal, delta={"insights": [{"statement": "x"}]})
-    graph = build(
-        journal,
-        plan=analysis_plan(AgentName.TREND, AgentName.COMPETITOR, AgentName.FORECAST),
-        overrides={NodeName.INSIGHT: insight},
-    )
-
-    final = await graph.ainvoke(entry_state())
-
-    assert len(insight.seen) == 1
-    assert insight.seen[0].trend_count == 1
-    assert insight.seen[0].has_competitor_view is True
-    assert insight.seen[0].forecast_count == 1
-    assert len(final["trends"]) == 1  # the append reducer, not a lost write
-
-
-async def test_a_dead_branch_does_not_hang_or_fail_the_join() -> None:
-    """One branch raises, one never returns, and the run still finishes.
-
-    The hung branch is the important half: a raising node is at least visible,
-    while a node that simply never returns holds the join open forever and
-    reports nothing. `INVESTIGATION_TIMEOUT_SECONDS=1` puts a one-second ceiling
-    on every node, which is what converts the hang into a recorded error.
+    The fan-out tests that used to live here -- planned-only dispatch, the join
+    waiting for every branch, a dead branch neither hanging nor failing the join
+    -- went with the three market branches they were written against, because
+    `ANALYSIS_BRANCHES` and `CONCURRENT_NODES` are both empty and `NodeName` has
+    no member to stand one up under. The machinery in `agents/graph.py` that
+    those tests covered is still there and is now dormant and unexercised;
+    whoever registers the developer platform's first branch owns re-deriving that
+    coverage rather than assuming it survived.
     """
     journal: list[str] = []
-    settings = AgentSettings(
-        INVESTIGATION_MAX_STEPS=30,
-        INVESTIGATION_TIMEOUT_SECONDS=1,
-        MAX_CRITIC_REVISIONS=2,
-        INVESTIGATION_TOKEN_BUDGET=1_000_000,
-    )
-    insight = agent_for(NodeName.INSIGHT, journal, delta={"insights": [{"statement": "x"}]})
-    graph = build(
-        journal,
-        plan=analysis_plan(AgentName.TREND, AgentName.COMPETITOR, AgentName.FORECAST),
-        overrides={
-            NodeName.TREND: agent_for(
-                NodeName.TREND,
-                journal,
-                error=PermanentAgentError("trend blew up", agent=AgentName.TREND),
-            ),
-            NodeName.COMPETITOR: agent_for(NodeName.COMPETITOR, journal, hang=True),
-            NodeName.INSIGHT: insight,
-        },
-        settings=settings,
-    )
+    graph = build(journal, plan=analysis_plan(AgentName.INSIGHT, AgentName.STRATEGY))
 
-    final = await asyncio.wait_for(graph.ainvoke(entry_state()), timeout=30)
+    final = await graph.ainvoke(entry_state())
 
-    assert final["report"] == {"title": "findings"}
-    assert len(insight.seen) == 1
-    assert insight.seen[0].forecast_count == 1  # the surviving branch still landed
-    failed = {error.agent: error.error_type for error in unavailable_branches(final)}
-    assert failed == {AgentName.TREND: "unexpected", AgentName.COMPETITOR: "timeout"}
+    assert unavailable_branches(final) == []
+    assert journal.count(str(AgentName.INSIGHT)) == 1
+    assert final["status"] is InvestigationStatus.COMPLETED
 
 
 async def test_a_fan_out_branch_never_writes_a_scalar_the_others_also_write() -> None:
@@ -506,7 +441,7 @@ async def test_a_critic_that_always_revises_still_terminates() -> None:
     journal: list[str] = []
     graph = build(
         journal,
-        plan=analysis_plan(AgentName.TREND),
+        plan=analysis_plan(AgentName.INSIGHT),
         overrides={NodeName.CRITIC: relentless_critic(journal, target_stage="insight")},
     )
 
@@ -533,7 +468,7 @@ async def test_a_critic_that_repeats_itself_stops_before_the_cap() -> None:
     journal: list[str] = []
     graph = build(
         journal,
-        plan=analysis_plan(AgentName.TREND),
+        plan=analysis_plan(AgentName.INSIGHT),
         critique={
             "verdict": "revise",
             "target_stage": "insight",
@@ -562,7 +497,7 @@ async def test_a_critic_that_stops_producing_critiques_cannot_re_enter_forever()
     first_pass = {"critique": {"verdict": "revise", "findings": [{"target_stage": "insight"}]}}
     graph = build(
         journal,
-        plan=analysis_plan(AgentName.TREND),
+        plan=analysis_plan(AgentName.INSIGHT),
         overrides={
             # One critique, then silence: the state keeps re-offering the same
             # `revise` verdict to the router on every subsequent pass.
@@ -588,7 +523,7 @@ async def test_the_final_pass_cannot_replace_the_report_or_touch_the_counter() -
     )
     graph = build(
         journal,
-        plan=analysis_plan(AgentName.TREND),
+        plan=analysis_plan(AgentName.INSIGHT),
         overrides={NodeName.CRITIC_FINAL: rogue},
     )
 
@@ -603,7 +538,7 @@ async def test_the_re_entry_target_comes_from_the_finding() -> None:
     journal: list[str] = []
     graph = build(
         journal,
-        plan=analysis_plan(AgentName.TREND),
+        plan=analysis_plan(AgentName.INSIGHT),
         overrides={NodeName.CRITIC: relentless_critic(journal, target_stage="strategy")},
     )
 
@@ -630,7 +565,7 @@ async def test_the_step_ceiling_halts_the_run_and_still_ships_a_report() -> None
     )
     graph = build(
         journal,
-        plan=analysis_plan(AgentName.TREND, AgentName.COMPETITOR),
+        plan=analysis_plan(AgentName.INSIGHT, AgentName.STRATEGY),
         critique={"verdict": "revise", "findings": [{"target_stage": "insight"}]},
         settings=settings,
     )
@@ -646,7 +581,7 @@ async def test_the_step_ceiling_halts_the_run_and_still_ships_a_report() -> None
 
 async def test_an_expired_deadline_halts_before_the_first_agent_call() -> None:
     journal: list[str] = []
-    graph = build(journal, plan=analysis_plan(AgentName.TREND))
+    graph = build(journal, plan=analysis_plan(AgentName.INSIGHT))
 
     final = await graph.ainvoke(entry_state(deadline_at=utcnow() - timedelta(seconds=1)))
 
@@ -671,7 +606,7 @@ async def test_the_report_gets_real_wall_clock_after_the_deadline_that_halted_it
     slow_report.pause_seconds = MIN_NODE_TIMEOUT_SECONDS + 0.2
     graph = build(
         journal,
-        plan=analysis_plan(AgentName.TREND),
+        plan=analysis_plan(AgentName.INSIGHT),
         overrides={NodeName.REPORT: slow_report},
     )
 
@@ -692,7 +627,7 @@ async def test_an_exhausted_token_budget_halts_but_the_exit_path_still_runs() ->
         MAX_CRITIC_REVISIONS=2,
         INVESTIGATION_TOKEN_BUDGET=1_000,
     )
-    graph = build(journal, plan=analysis_plan(AgentName.TREND), settings=settings)
+    graph = build(journal, plan=analysis_plan(AgentName.INSIGHT), settings=settings)
 
     final = await graph.ainvoke(
         entry_state(tokens_spent=TokenLedger(input_tokens=900, output_tokens=100, calls=3))
@@ -705,7 +640,7 @@ async def test_an_exhausted_token_budget_halts_but_the_exit_path_still_runs() ->
 
 async def test_a_cancelled_run_writes_nothing_further() -> None:
     journal: list[str] = []
-    graph = build(journal, plan=analysis_plan(AgentName.TREND))
+    graph = build(journal, plan=analysis_plan(AgentName.INSIGHT))
 
     final = await graph.ainvoke(entry_state(status=InvestigationStatus.CANCELLED))
 
@@ -739,7 +674,7 @@ async def test_a_blocking_failure_ends_the_run_as_failed() -> None:
 
 async def test_the_halt_reason_is_recorded_once_not_once_per_skipped_node() -> None:
     journal: list[str] = []
-    graph = build(journal, plan=analysis_plan(AgentName.TREND, AgentName.COMPETITOR))
+    graph = build(journal, plan=analysis_plan(AgentName.INSIGHT, AgentName.STRATEGY))
 
     final = await graph.ainvoke(entry_state(deadline_at=utcnow() - timedelta(seconds=1)))
 
@@ -754,7 +689,7 @@ async def test_the_halt_reason_is_recorded_once_not_once_per_skipped_node() -> N
 
 async def test_every_node_contributes_its_spend_and_its_prompt_version() -> None:
     journal: list[str] = []
-    graph = build(journal, plan=analysis_plan(AgentName.TREND, AgentName.COMPETITOR))
+    graph = build(journal, plan=analysis_plan(AgentName.INSIGHT, AgentName.STRATEGY))
 
     final = await graph.ainvoke(entry_state())
 
@@ -775,7 +710,7 @@ async def test_state_is_checkpointed_after_every_node() -> None:
     journal: list[str] = []
     graph = build(
         journal,
-        plan=analysis_plan(AgentName.TREND),
+        plan=analysis_plan(AgentName.INSIGHT),
         checkpointer=memory_checkpointer(),
     )
     config = thread_config("inv-1")
@@ -799,7 +734,7 @@ async def test_a_resumed_run_continues_from_the_checkpoint() -> None:
     journal: list[str] = []
     graph = build(
         journal,
-        plan=analysis_plan(AgentName.TREND),
+        plan=analysis_plan(AgentName.INSIGHT),
         checkpointer=memory_checkpointer(),
     )
     graph.checkpointer = graph.checkpointer  # explicit: the saver is the one above

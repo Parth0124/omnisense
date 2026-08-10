@@ -270,63 +270,6 @@ RUBRICS: Final[Mapping[AgentName, AgentRubric]] = {
             ),
         ),
     ),
-    AgentName.TREND: AgentRubric(
-        AgentName.TREND,
-        (
-            _c("every_number_from_a_series", "No figure appears that a tool did not return.", 0.40),
-            _c("direction_matches_the_data", "Claimed direction survives verification.", 0.25),
-            _c("observation_counts_present", "Every trend states how many points support it.", 0.15),
-            _c(
-                "volatility_used_honestly",
-                "Noisy series are called volatile rather than given a direction.",
-                0.20,
-                _JUDGED,
-                guidance=(
-                    "'Rising' sounds like a finding and 'volatile' does not, so the "
-                    "failure is one-directional. Score down for a direction asserted "
-                    "over a series that visibly wobbles."
-                ),
-            ),
-        ),
-    ),
-    AgentName.COMPETITOR: AgentRubric(
-        AgentName.COMPETITOR,
-        (
-            _c("stated_claims_are_cited", "Every 'stated' rivalry carries a signal id.", 0.35),
-            _c("basis_is_accurate", "Inferences are not labelled as stated.", 0.25),
-            _c("graph_degradation_reported", "An unreadable graph is disclosed.", 0.15),
-            _c(
-                "overlap_is_specific",
-                "Says where the two compete, not merely that they do.",
-                0.25,
-                _JUDGED,
-                guidance=(
-                    "Two firms competing in one line and partnering in another is the "
-                    "interesting shape. Score down for a bare list of names with no "
-                    "statement of the market they contest."
-                ),
-            ),
-        ),
-    ),
-    AgentName.FORECAST: AgentRubric(
-        AgentName.FORECAST,
-        (
-            _c("no_invented_numbers", "Every point came from fit_forecast.", 0.40),
-            _c("intervals_well_formed", "Every band contains its own estimate.", 0.15),
-            _c("history_sufficient", "Short series are refused, not fitted.", 0.20),
-            _c(
-                "caveats_are_specific",
-                "Caveats name what would break this projection.",
-                0.25,
-                _JUDGED,
-                guidance=(
-                    "'Conditions may change' is true of everything and warns nobody. "
-                    "Score down for generic caveats; score up for one naming the "
-                    "assumption this particular fit depends on."
-                ),
-            ),
-        ),
-    ),
     AgentName.INSIGHT: AgentRubric(
         AgentName.INSIGHT,
         (

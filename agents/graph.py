@@ -73,7 +73,6 @@ from agents.router import (
     route_after_report,
     route_after_retriever,
     route_after_strategy,
-    route_after_trend,
     terminal_status,
 )
 from agents.state import AgentError, InvestigationState, TokenLedger
@@ -147,9 +146,7 @@ missing Critic would run, produce a report, and have skipped the only step that
 checks whether the report is true.
 """
 
-CONCURRENT_NODES: Final[frozenset[NodeName]] = frozenset(
-    {NodeName.TREND, NodeName.COMPETITOR, NodeName.FORECAST}
-)
+CONCURRENT_NODES: Final[frozenset[NodeName]] = frozenset()
 """The fan-out branches -- the only nodes that can execute concurrently.
 
 They are excluded from every scalar write the wrapper makes (`status`,
@@ -558,27 +555,13 @@ def build_investigation_graph(
     builder.add_conditional_edges(
         str(NodeName.GRAPH_EXPANSION),
         bind(dispatch_analysis),
-        [
-            str(NodeName.TREND),
-            str(NodeName.COMPETITOR),
-            str(NodeName.FORECAST),
-            str(NodeName.INSIGHT),
-            str(NodeName.REPORT),
-            END,
-        ],
+        # `ANALYSIS_BRANCHES` is empty since the pivot, so this always resolves
+        # to Insight. The conditional edge stays rather than becoming a static
+        # one because the destination list is what LangGraph validates against:
+        # adding a branch back means extending this list and the table in
+        # `agents/router.py`, with no change to the dispatch logic itself.
+        [str(NodeName.INSIGHT), str(NodeName.REPORT), END],
     )
-    # The only conditional edge inside the fan-out, and it has exactly two
-    # destinations: Forecast when the plan serialised it behind Trend, otherwise
-    # the join. Competitor and Forecast take unconditional edges to the join --
-    # a guard-aware conditional on a concurrent branch could send two branches
-    # to two different nodes in the same superstep and split one join into two.
-    builder.add_conditional_edges(
-        str(NodeName.TREND),
-        bind(route_after_trend),
-        [str(NodeName.FORECAST), str(NodeName.INSIGHT)],
-    )
-    builder.add_edge(str(NodeName.COMPETITOR), str(NodeName.INSIGHT))
-    builder.add_edge(str(NodeName.FORECAST), str(NodeName.INSIGHT))
 
     builder.add_conditional_edges(
         str(NodeName.INSIGHT),

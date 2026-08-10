@@ -23,7 +23,6 @@ becomes a public API by accident, discovered when it is removed.
 
 from __future__ import annotations
 
-import enum
 from datetime import datetime
 from typing import Final
 
@@ -34,8 +33,6 @@ from backend.schemas.common import RequestModel, ResponseModel
 __all__ = [
     "MAX_GRAPH_QUERY_CHARS",
     "MAX_SEED_IDS",
-    "CompetitorItem",
-    "CompetitorsResponse",
     "EntityDetail",
     "EntityHit",
     "EntitySearchResponse",
@@ -43,8 +40,6 @@ __all__ = [
     "GraphNode",
     "GraphPathItem",
     "GraphPathsResponse",
-    "OwnershipChainResponse",
-    "RelationshipBasis",
     "SignalMentionItem",
     "SubgraphRequest",
     "SubgraphResponse",
@@ -67,21 +62,6 @@ Each seed expands to a neighbourhood, so the cost is multiplicative rather than
 additive. Fifty seeds at depth 2 is already the largest graph a canvas can
 usefully draw; beyond that the picture is a hairball and the query is expensive.
 """
-
-
-class RelationshipBasis(enum.StrEnum):
-    """How a relationship was established.
-
-    Published because the distinction changes what a claim built on the edge is
-    worth. `stated` means a document said it; `inferred` means the system
-    concluded it from co-occurrence. A UI that renders both identically lets a
-    statistical hunch be read as a sourced fact.
-    """
-
-    STATED = "stated"
-    INFERRED = "inferred"
-    DERIVED = "derived"
-    UNKNOWN = "unknown"
 
 
 # --------------------------------------------------------------------------- #
@@ -149,58 +129,10 @@ class EntityDetail(ResponseModel):
 # --------------------------------------------------------------------------- #
 
 
-class CompetitorItem(ResponseModel):
-    id: str
-    name: str
-    type: str
-    strength: float | None = Field(
-        default=None,
-        description=(
-            "0-1 rivalry strength. Null means the relationship was never scored, "
-            "which is not the same as 0.0 (assessed and negligible)."
-        ),
-    )
-    basis: RelationshipBasis = RelationshipBasis.UNKNOWN
-    market: str | None = None
-    confidence: float | None = None
-    evidence_count: int = 0
-    valid_from: datetime | None = None
-    valid_to: datetime | None = Field(
-        default=None, description="Null means the relationship is currently held to be true."
-    )
-    citations: list[str] = Field(
-        default_factory=list,
-        max_length=5,
-        description="Signal ids evidencing this edge. Truncated; not the full set.",
-    )
 
 
-class CompetitorsResponse(ResponseModel):
-    subject: str
-    as_of: datetime = Field(
-        description=(
-            "The instant the graph was read at. Echoed back because it defaults "
-            "to now on the server, and a client that omitted it cannot otherwise "
-            "reproduce the result."
-        )
-    )
-    results: list[CompetitorItem]
-    total: int
 
 
-class OwnershipChainResponse(ResponseModel):
-    """Who ultimately owns a company. `chain` is empty when nothing acquired it."""
-
-    company_id: str
-    as_of: datetime
-    chain: list[str] = Field(
-        default_factory=list, description="Entity ids, ultimate owner first."
-    )
-    names: list[str] = Field(default_factory=list)
-    hops: int = 0
-    is_independent: bool = Field(
-        description="True when no closed acquisition reaches this company."
-    )
 
 
 class SignalMentionItem(ResponseModel):

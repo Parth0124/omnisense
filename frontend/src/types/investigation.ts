@@ -78,14 +78,11 @@ export type StepState = Open<
   'pending' | 'running' | 'completed' | 'failed' | 'skipped' | 'cancelled' | 'unknown'
 >;
 
-/** The ten agents of Design Doc §9 — `models/enums.py::AgentName`. */
+/** The seven agents — `models/enums.py::AgentName`. */
 export type AgentName = Open<
   | 'planner'
   | 'collector'
   | 'retriever'
-  | 'trend'
-  | 'competitor'
-  | 'forecast'
   | 'insight'
   | 'strategy'
   | 'critic'

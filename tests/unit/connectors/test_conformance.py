@@ -160,23 +160,83 @@ class TestDeclaration:
 
 
 class TestGatedConnectors:
-    """Connectors with no lawful open surface must say so."""
+    """Connectors with no lawful open surface must say so, and must not run.
 
-    TOS_GATED = {"linkedin", "instagram", "tiktok", "amazon", "google_reviews"}
+    Nothing shipped is gated today -- the five that were (LinkedIn, Instagram,
+    TikTok, Amazon, Google Reviews) had no lawful third-party API for the data
+    this product needed, and they went with the pivot rather than being carried
+    as permanently-refused entries. The gate itself stays, because the property
+    it enforces is about the *next* connector somebody adds, not about those
+    five, and a mechanism nobody exercises is a mechanism that has quietly
+    stopped working.
+    """
 
-    def test_the_gated_set_is_flagged(self) -> None:
-        """`requires_tos_review` is what lets the catalogue distinguish a policy
-        refusal from an outage -- otherwise an operator debugs a decision."""
-        flagged = {c.slug for c in SHIPPED if c.requires_tos_review}
-        assert flagged == self.TOS_GATED
+    def test_nothing_shipped_is_gated(self) -> None:
+        """Every connector in `SHIPPED` has an official API for what it reads.
 
-    def test_gated_connectors_require_a_credential(self) -> None:
-        """None of them may be reachable without one.
-
-        `AuthType.NONE` on a gated platform would mean the connector believes it
-        can collect anonymously -- which for these five would only be true of a
-        scraper.
+        Stated as an assertion rather than left implicit so that adding a gated
+        connector to `SHIPPED` is a decision somebody has to make here, in a
+        reviewed change, rather than a line in `connectors/__init__.py`.
         """
+        assert {c.slug for c in SHIPPED if c.requires_tos_review} == set()
+
+    def test_a_gated_connector_cannot_be_enabled(self) -> None:
+        """The gate, exercised against a connector built to trip it.
+
+        Asserted with a purpose-built class rather than by looping over `SHIPPED`,
+        which would pass vacuously now that nothing is flagged. `requires_tos_review`
+        is the only thing standing between a scraper and production traffic, and
+        there is deliberately no runtime override -- so the failure mode to guard
+        against is not "somebody overrides it" but "somebody deletes the check and
+        every test still passes".
+        """
+
+        class GatedConnector(BaseConnector):
+            """Concrete, because the registry refuses an abstract class outright.
+
+            That refusal is its own guard -- registering an unimplementable
+            connector would defer a `TypeError` to the first scheduled run -- so
+            the four methods are stubbed rather than left abstract. None of them
+            is ever called: `enable()` raises before anything is instantiated,
+            which is the point.
+            """
+
+            slug = "gated_test_only"
+            # A real platform, because the registry refuses `UNKNOWN` -- that
+            # member exists so readers tolerate values from newer producers, not
+            # so a connector can decline to say what it is. LinkedIn is the
+            # honest choice: it is exactly the kind of platform the gate is for.
+            platform = Platform.LINKEDIN
+            category = SourceCategory.SOCIAL
+            auth_type = AuthType.OAUTH2
+            version = "0.0.1"
+            requires_tos_review = True
+
+            @classmethod
+            def from_config(cls, *args: object, **kwargs: object) -> GatedConnector:
+                raise AssertionError("a gated connector must never be constructed")
+
+            async def authenticate(self, *args: object, **kwargs: object) -> None:
+                raise AssertionError("a gated connector must never authenticate")
+
+            async def fetch(self, *args: object, **kwargs: object) -> None:
+                raise AssertionError("a gated connector must never fetch")
+
+            async def normalize(self, *args: object, **kwargs: object) -> None:
+                raise AssertionError("a gated connector must never normalize")
+
+        registry.register(GatedConnector)
+        try:
+            with pytest.raises(registry.ConnectorConfigurationError, match="requires_tos_review"):
+                registry.enable(GatedConnector.slug)
+            assert not registry.is_enabled(GatedConnector.slug)
+        finally:
+            registry.unregister(GatedConnector.slug)
+
+    def test_a_gated_connector_may_not_declare_it_needs_no_credential(self) -> None:
+        """`AuthType.NONE` on a gated platform means the connector believes it can
+        collect anonymously -- which for a platform with no lawful API is only
+        true of a scraper."""
         for connector in SHIPPED:
             if connector.requires_tos_review:
                 assert connector.auth_type is not AuthType.NONE, (

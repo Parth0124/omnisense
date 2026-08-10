@@ -22,10 +22,8 @@ from backend.core.exceptions import (
 from graph.client import GraphClient, GraphQueryError, GraphUnavailableError
 from models.enums import EdgeType, EntityType
 from services.graph_service import (
-    Competitor,
     Entity,
     GraphService,
-    OwnershipChain,
 )
 
 pytestmark = pytest.mark.unit
@@ -120,11 +118,26 @@ class TestDegradation:
         with pytest.raises(DependencyUnavailableError):
             await service.signals_for_entity(tenant_id="t", entity_id="e")
 
-    async def test_competitors_degrade_only_when_asked(self) -> None:
+    async def test_topic_activity_degrades_only_when_asked(self) -> None:
+        """The two call sites genuinely differ, which is why this is an argument
+        rather than a blanket try/except.
+
+        Topic activity feeding an investigation is one input among several, and
+        losing it should cost confidence rather than the whole run. The same call
+        made without `allow_degraded` must still raise -- a caller that treats an
+        outage as "no activity" has turned a wrong answer into a plausible one.
+        """
         service = _failing_service(GraphUnavailableError("down"))
         with pytest.raises(DependencyUnavailableError):
-            await service.competitors(tenant_id="t", name="Acme")
-        assert await service.competitors(tenant_id="t", name="Acme", allow_degraded=True) == []
+            await service.topic_activity(
+                tenant_id="t", since=NOW - timedelta(days=1), allow_degraded=False
+            )
+        assert (
+            await service.topic_activity(
+                tenant_id="t", since=NOW - timedelta(days=1), allow_degraded=True
+            )
+            == []
+        )
 
     async def test_a_rejected_query_is_never_degraded(self) -> None:
         """Degrading past a malformed query hides it permanently rather than for
@@ -144,26 +157,21 @@ class TestRowMapping:
     def test_null_score_stays_none(self) -> None:
         """0.0 means 'assessed and negligible'; None means 'nobody assessed it'.
         A UI that renders None as 0.0 asserts something the graph never said."""
-        competitor = Competitor.from_row({"id": "x", "name": "X", "strength": None})
-        assert competitor.strength is None
+        assert Entity.from_row({"id": "x", "name": "X", "confidence": None}).confidence is None
 
     def test_zero_score_is_preserved_as_zero(self) -> None:
-        assert Competitor.from_row({"id": "x", "name": "X", "strength": 0.0}).strength == 0.0
+        assert Entity.from_row({"id": "x", "name": "X", "confidence": 0.0}).confidence == 0.0
 
     def test_booleans_are_not_mistaken_for_numbers(self) -> None:
-        """`bool` is a subclass of `int` in Python."""
-        assert Competitor.from_row({"id": "x", "name": "X", "strength": True}).strength is None
+        """`bool` is a subclass of `int` in Python, so an unguarded isinstance
+        check turns `True` into 1.0 and reports a confidence nobody assessed."""
+        assert Entity.from_row({"id": "x", "name": "X", "confidence": True}).confidence is None
 
     def test_unknown_label_degrades_rather_than_crashing_a_search(self) -> None:
         """Tolerant on the way in is right for a reader: a label written by a
         newer producer must not crash search. Strictness lives on the write and
         filter paths."""
         assert Entity.from_row({"id": "x", "type": "Spaceship"}).type is EntityType.UNKNOWN
-
-    def test_stated_rivalry_is_distinguishable_from_inferred(self) -> None:
-        """A report that cannot tell them apart overstates its own evidence."""
-        assert Competitor.from_row({"id": "x", "name": "X", "basis": "stated"}).is_stated
-        assert not Competitor.from_row({"id": "x", "name": "X", "basis": "inferred"}).is_stated
 
     def test_never_computed_analytics_read_as_stale(self) -> None:
         assert Entity.from_row({"id": "x"}).analytics_are_stale
@@ -185,12 +193,6 @@ class TestRowMapping:
     def test_malformed_lists_do_not_crash_the_mapper(self) -> None:
         assert Entity.from_row({"id": "x", "aliases": "not-a-list"}).aliases == ()
 
-    def test_ownership_chain_names_the_root_first(self) -> None:
-        chain = OwnershipChain.from_row(
-            {"chain_ids": ["a", "b"], "ownership_chain": ["Parent", "Child"], "hops": 1}
-        )
-        assert chain.ultimate_owner == "Parent"
-
 
 class TestQueryWiring:
     async def test_search_returns_typed_entities(self) -> None:
@@ -199,13 +201,12 @@ class TestQueryWiring:
         assert results[0].type is EntityType.COMPANY
         assert results[0].score == 2.5
 
-    async def test_independent_company_returns_none_not_an_empty_chain(self) -> None:
-        """Dressing 'independent' up as a zero-length chain makes every caller
-        check `hops == 0` to discover it."""
-        assert await _service([]).ownership_chain(tenant_id="t", company_id="c") is None
-
-    async def test_empty_competitor_result_is_a_valid_answer(self) -> None:
-        assert await _service([]).competitors(tenant_id="t", name="Acme") == []
+    async def test_an_empty_result_is_a_valid_answer(self) -> None:
+        """Distinct from an outage, which raises. `graph/client.py` returns `None`
+        for an empty result because at that layer "not in the graph" is an
+        ordinary answer; this layer decides which absences are 404s and which are
+        empty lists, and a search that matched nothing is the latter."""
+        assert await _service([]).search(tenant_id="t", query="acme") == []
 
 
 class TestAgentPort:

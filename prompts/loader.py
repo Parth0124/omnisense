@@ -94,9 +94,6 @@ injected text are exactly the mechanical ones (Collector, Retriever) that a
 _EVIDENCE_BEARING: Final[frozenset[AgentName]] = frozenset(
     {
         AgentName.RETRIEVER,
-        AgentName.TREND,
-        AgentName.COMPETITOR,
-        AgentName.FORECAST,
         AgentName.INSIGHT,
         AgentName.STRATEGY,
         AgentName.CRITIC,

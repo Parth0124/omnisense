@@ -41,10 +41,10 @@ connector -- a bare `{"data": {...}}` could be four different sources. So the
 stage takes a `FieldMapResolver`, `(connector_slug, payload) -> FieldMap | None`,
 keyed on the slug the event carries. It is a *function* rather than a dict
 because one slug can need more than one map, and the choice is a property of the
-payload: Reddit maps posts and comments differently (`kind` is `t3` or `t1`),
-RSS picks between three maps depending on whether the entry carried a full
-`<content>` or a teaser, and NewsAPI picks by whether the body is an excerpt.
-Those decisions live in the connectors that own them; this module only asks.
+payload: GitHub maps issues, discussions and releases differently -- three
+different APIs' worth of field names for the same six concepts, chosen by the
+stream the connector recorded in its envelope. That decision lives in the
+connector that owns it; this module only asks.
 
 An unmapped slug raises `NormalizationError` naming it. The tempting
 alternative -- fall back to a generic map, emit what can be found -- produces a
@@ -58,8 +58,8 @@ Two properties this stage enforces beyond mapping
 object and the Kafka partition. If the rebuilt Signal derives a different one,
 the same item now exists under two identities in five stores, and no reconciler
 can tell which is real. The disagreement is caught here rather than discovered
-as duplicate rows months later -- the same check `connectors/social/reddit.py`
-makes on its own side.
+as duplicate rows months later -- the same check `connectors/enterprise/github.py`
+makes on its own side, against the same `node_id`.
 
 **`pipeline_version` becomes real here.** Connectors stamp
 `UNENRICHED_PIPELINE_VERSION` (`"0.0.0"`) because they have run no enrichment
@@ -72,15 +72,23 @@ other write forever. Stage 2 stamps `ctx.pipeline_version`, which
 
 Known limitation: post-map connector fix-ups are not reproduced
 ---------------------------------------------------------------
-Three of the four shipped connectors do a little work in `normalize()` *outside*
-their `FieldMap` -- NewsAPI attaches `urlToImage` as a single `MediaRef` and
-records `news_api.truncated_chars`, GDELT attaches `socialimage` -- because
-`MediaMap` addresses a list and those providers carry a scalar. A declarative
-rebuild cannot see any of it, so a reprocessed Signal from those two sources
-loses its social-card image. That is a bounded, visible loss (`media` is empty,
-not wrong), and the fix belongs in `FieldMap` -- a scalar media declaration --
-not in a per-connector branch here, which `models/signal.py` forbids on
-principle: no platform-shaped code above `connectors/`.
+A connector may do work in `normalize()` *outside* its `FieldMap`, and a
+declarative rebuild cannot see any of it. GitHub's is the live example: it drops
+a draft release, which has a `node_id` and a body and maps perfectly well but has
+not happened yet. Nothing here knows that, so a reprocessed draft would become a
+Signal announcing an unpublished release.
+
+In practice no draft reaches this stage, and the reason is worth being precise
+about because it is incidental rather than designed: `_fetch_releases` sorts by
+`published_at` and drops anything without a parseable one, so a draft is never
+archived and there is no raw record to reprocess. The explicit `draft is True`
+check in the connector's own `normalize()` is a second belt on the same
+trousers. Neither is a guarantee this stage holds -- a stream added later that
+archives an unpublished object would rebuild it here with nothing to stop it.
+
+The fix belongs in `FieldMap` (a declarative drop predicate) rather than in a
+per-connector branch here, which `models/signal.py` forbids on principle: no
+platform-shaped code above `connectors/`.
 
 Layer note: `services/` (L2), which `docs/architecture.md` §6.1 permits to import
 `connectors/`. The import runs the other way round from the connector's own
@@ -135,72 +143,62 @@ a resolver that raised would deny `NormalizeStage` the chance to attach the
 
 @lru_cache(maxsize=1)
 def _shipped_selectors() -> Mapping[str, Callable[[Mapping[str, Any]], FieldMap | None]]:
-    """Slug -> "pick this payload's map", for the four connectors that ship today.
+    """Slug -> "pick this payload's map", for every connector that maps by table.
 
-    Built lazily and cached rather than at module import for two reasons. It
-    keeps `import services.signal_engine.normalize` free of `feedparser`, `httpx`
-    and every other connector dependency, so a deployment that assembles the
-    pipeline with its own resolver does not pay for connectors it will never
-    run. And it keeps the import cycle shallow: `services/` importing four
-    connector modules at definition time makes any future connector that reaches
-    for a `services/` helper an import-time crash instead of a review comment.
+    Only GitHub is here, and the shortness of the table is the honest answer
+    rather than a gap. A `FieldMap` is worth building when one connector emits
+    several payload shapes that differ only in where the same fields live -- an
+    issue, a discussion and a release are three such shapes. The other shipped
+    connectors (Jira, Slack, Confluence, Notion, arXiv, Semantic Scholar, Papers
+    with Code) each emit one shape and construct their `Signal` directly in
+    `normalize()`, so there is no map to rebuild and nothing for this resolver to
+    return. `None` for those slugs is correct: it means "this connector does not
+    normalize by field map", not "this connector is unknown".
 
-    **These are private names in their own modules and are imported anyway.**
-    The alternative is a second copy of four field maps living in `services/`,
-    and a `FieldMap` decides `truncated`, the metadata namespace and -- through
-    the body it produces -- rule 3 of `native_id`. Two copies that drift by one
-    path give the same item two identities depending on which side rebuilt it,
-    which is precisely the failure this stage exists to prevent. One shared
-    definition, imported across a boundary that the architecture matrix already
-    permits, is the lesser evil; the maps are `Final` and never rebound.
+    Built lazily and cached rather than at module import so that
+    `import services.signal_engine.normalize` stays free of `httpx` and every
+    other connector dependency -- a deployment that assembles the pipeline with
+    its own resolver should not pay for connectors it will never run. It also
+    keeps the import cycle shallow: `services/` importing connector modules at
+    definition time makes any future connector that reaches for a `services/`
+    helper an import-time crash instead of a review comment.
+
+    **`_FIELD_MAPS` is a private name in its own module and is imported anyway.**
+    The alternative is a second copy of the maps living in `services/`, and a
+    `FieldMap` decides `truncated`, the metadata namespace and -- through the
+    body it produces -- rule 3 of `native_id`. Two copies that drift by one path
+    give the same item two identities depending on which side rebuilt it, which
+    is precisely the failure this stage exists to prevent. One shared definition,
+    imported across a boundary the architecture matrix already permits, is the
+    lesser evil; the maps are `Final` and never rebound.
     """
-    from connectors.news.gdelt import _FIELD_MAP as GDELT_MAP
-    from connectors.news.gdelt import GdeltConnector
-    from connectors.news.news_api import _EXCERPT_MAP, _FULL_MAP, NewsApiConnector, _truncation
-    from connectors.news.rss import RssConnector, _map_for
-    from connectors.social.reddit import _FIELD_MAPS, RedditConnector
+    from connectors.enterprise.github import _FIELD_MAPS, ENVELOPE_KEY, GitHubConnector
 
-    def rss(payload: Mapping[str, Any]) -> FieldMap:
-        # Three maps, chosen by where the body came from and how long it is.
-        return _map_for(payload)
+    def github(payload: Mapping[str, Any]) -> FieldMap | None:
+        # The stream lives in the envelope the connector attached at fetch time,
+        # not in the GitHub object -- an issue and a discussion are structurally
+        # similar enough that guessing from the payload would misclassify one of
+        # them. An unmapped stream resolves to `None` and fails loudly, because a
+        # stream this table has never seen is a payload shape nobody mapped.
+        envelope = payload.get(ENVELOPE_KEY)
+        if not isinstance(envelope, Mapping):
+            return None
+        stream = envelope.get("stream")
+        return _FIELD_MAPS.get(stream) if isinstance(stream, str) else None
 
-    def news_api(payload: Mapping[str, Any]) -> FieldMap:
-        # `_truncation` returns (truncated, remaining); only the flag selects a
-        # map. `remaining` is metadata the connector attaches and this rebuild
-        # cannot -- see the module docstring.
-        truncated, _ = _truncation(payload)
-        return _EXCERPT_MAP if truncated else _FULL_MAP
-
-    def gdelt(payload: Mapping[str, Any]) -> FieldMap:
-        # One map: GDELT returns metadata about an article, never the article,
-        # so there is no body-provenance choice to make.
-        return GDELT_MAP
-
-    def reddit(payload: Mapping[str, Any]) -> FieldMap | None:
-        # A listing child is `{"kind": "t3"|"t1", "data": {...}}`. An unknown
-        # kind resolves to `None` and fails loudly: Reddit's `kind` values are a
-        # closed set and a new one is a payload shape nobody has mapped yet.
-        kind = payload.get("kind")
-        return _FIELD_MAPS.get(kind) if isinstance(kind, str) else None
-
-    return {
-        RssConnector.slug: rss,
-        NewsApiConnector.slug: news_api,
-        GdeltConnector.slug: gdelt,
-        RedditConnector.slug: reddit,
-    }
+    return {GitHubConnector.slug: github}
 
 
 def default_field_map_resolver(
     connector_slug: str, payload: Mapping[str, Any]
 ) -> FieldMap | None:
-    """The shipped `FieldMapResolver`: RSS, NewsAPI, GDELT and Reddit.
+    """The shipped `FieldMapResolver`.
 
     Keyed on `connector_slug` rather than on `platform` because the slug is what
     `RawRecordEvent` carries and what `Lineage.connector_slug` records, and
-    because two connectors can legitimately target one platform (a public RSS
-    poller and an authenticated partner feed are different code with different
-    payload shapes and the same `Platform.RSS`).
+    because two connectors can legitimately target one platform (a public poller
+    and an authenticated partner feed are different code with different payload
+    shapes and the same `Platform`).
 
     Returns `None` for anything else, including a slug whose connector exists but
     whose payload shape this resolver cannot classify. `NormalizeStage` turns

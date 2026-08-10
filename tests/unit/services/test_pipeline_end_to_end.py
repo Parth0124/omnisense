@@ -26,10 +26,14 @@ no enrichment. `services/signal_engine/store.py` makes that field the upsert
 guard, so a Signal still carrying the zero version loses every race forever. The
 value that reaches PostgreSQL must be the version of the pipeline that ran.
 
-The payload is the newest-format entry of `tests/fixtures/payloads/rss_20_sample.xml`,
-parsed by the same `feedparser` the RSS connector uses and wrapped in the same
-`omnisense` envelope, so the field paths under test are the real ones rather than
-a hand-written approximation of them. The LLM and the embedding provider are the
+The payload is the first issue of `tests/fixtures/payloads/github_issues_page1.json`,
+shaped exactly as `GitHubConnector.fetch()` emits it -- the provider object
+verbatim under the same `omnisense` envelope -- so the field paths under test are
+the real ones rather than a hand-written approximation of them. GitHub is the
+right choice for this suite rather than merely an available one: it is the only
+shipped connector that maps several payload shapes through a *table* of
+`FieldMap`s, so it is the only one whose rebuild in stage 2 can pick the wrong map
+and still produce a plausible Signal. The LLM and the embedding provider are the
 offline fakes from `services/llm/`; the database is in-memory SQLite from
 `tests/conftest.py`; the publisher is four lines. Nothing here opens a socket and
 nothing here needs a service running.
@@ -41,16 +45,14 @@ import datetime as dt
 import hashlib
 import json
 from pathlib import Path
-from time import struct_time
 from typing import Any
 
-import feedparser
 import pytest
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
+from connectors.enterprise.github import ENVELOPE_KEY
 from connectors.exceptions import NormalizationError
-from connectors.news.rss import ENVELOPE_KEY
 from connectors.normalize.mapper import UNENRICHED_PIPELINE_VERSION
 from models.enums import Platform, SignalStatus, SourceCategory, StageName, StageStatus
 from models.orm.signal import SignalRow
@@ -60,36 +62,37 @@ from services.llm.provider import FakeLLMProvider
 from services.signal_engine.cleaning import EMAIL_PLACEHOLDER, CleaningStage, RegexRedactor
 from services.signal_engine.embeddings import EmbeddingStage, InMemoryVectorSink
 from services.signal_engine.enrichment import InMemoryCohortBaseline, ScoringStage
-from services.signal_engine.entities import EntityExtractionStage
 from services.signal_engine.language import LangdetectDetector, LanguageStage
 from services.signal_engine.normalize import (
     NormalizeStage,
     default_field_map_resolver,
 )
-from workers.enrichment_worker import build_pipeline as production_build_pipeline
 from services.signal_engine.pipeline import (
     EnrichmentContext,
     PipelineResult,
     SignalPipeline,
 )
-from services.signal_engine.sentiment import SentimentStage
 from services.signal_engine.store import StoreStage
+from workers.enrichment_worker import build_pipeline as production_build_pipeline
 
 pytestmark = pytest.mark.unit
 
 
 FIXTURES = Path(__file__).resolve().parents[2] / "fixtures" / "payloads"
-RSS_BYTES = (FIXTURES / "rss_20_sample.xml").read_bytes()
-REDDIT_LISTING = json.loads((FIXTURES / "reddit_listing_new_page1.json").read_text())
+GITHUB_ISSUES = json.loads((FIXTURES / "github_issues_page1.json").read_text())
 
-FEED_URL = "https://news.example.com/feed.xml"
-FULL_BODY_GUID = "tag:news.example.com,2026:post-4166"
-"""The one entry in the RSS fixture carrying a whole article in `content:encoded`.
+REPOSITORY = "omnisense/omnisense"
+ISSUE_NODE_ID = "I_kwDOABCD1M6TqXyN"
+"""The plain issue in the fixture -- the one that is not also a pull request.
 
-Chosen over the teaser entries because it is the only one that exercises the
-`content.0.value` path, `truncated=False`, and a body long enough for the
-language detector and the chunker to have something to say about.
+Chosen over the PR entry because it is the longer body, which gives the language
+detector and the chunker something to say, and because it leaves the PR available
+as the second payload shape the same map has to handle.
 """
+
+PR_NODE_ID = "PR_kwDOABCD1M6QmZ4A"
+"""The pull request. GitHub's issues endpoint returns both, and a PR *is* an issue
+in the data model -- distinguishable only by the `pull_request` key."""
 
 COLLECTION = "omnisense_signals_test"
 """Named explicitly rather than read from settings: the collection travels into
@@ -103,56 +106,38 @@ with the pipeline."""
 # --------------------------------------------------------------------------- #
 
 
-def _jsonable(value: Any) -> Any:
-    """Render feedparser's output as something `json.dumps` accepts.
+def github_issue_payload(node_id: str = ISSUE_NODE_ID) -> dict[str, Any]:
+    """One issue from the fixture, shaped as `GitHubConnector.fetch()` emits it.
 
-    Mirrors `connectors.news.rss._jsonable`, which the connector applies before
-    the runtime PUTs the payload to R2. The `struct_time` branch is the whole
-    point: `published_parsed` is the first path the RSS field map tries, and a
-    payload that could not be serialized is a payload that could never have come
-    back out of the object store.
+    The provider object verbatim, plus the `omnisense` envelope the connector
+    adds. Two of the envelope's keys are load-bearing rather than decorative:
+    `stream` is what the resolver reads to choose between three field maps, and
+    the issue map addresses `is_pull_request` at `omnisense.is_pull_request`
+    because GitHub's issues endpoint returns pull requests too and nothing in the
+    object itself says so except the presence of a `pull_request` key -- a rule
+    the connector applies once, in `fetch()`, so no consumer has to re-derive it.
     """
-    if value is None or isinstance(value, (str, bool, int, float)):
-        return value
-    if isinstance(value, struct_time):
-        moment = dt.datetime(*value[:6], tzinfo=dt.UTC)
-        return moment.isoformat().replace("+00:00", "Z")
-    if isinstance(value, dict):
-        return {str(key): _jsonable(item) for key, item in value.items()}
-    if isinstance(value, (list, tuple, set)):
-        return [_jsonable(item) for item in value]
-    return str(value)
-
-
-def rss_entry_payload(guid: str = FULL_BODY_GUID) -> dict[str, Any]:
-    """One entry from the RSS fixture, shaped as `RssConnector` emits it.
-
-    Real bytes through real feedparser, plus the `omnisense` envelope the
-    connector adds -- `native_id` and `author_id` in particular, which the field
-    map addresses at `omnisense.native_id` and `omnisense.author_id` and which no
-    feed carries on its own (RSS has bylines, not author ids).
-    """
-    parsed = feedparser.parse(RSS_BYTES)
-    feed = parsed.get("feed") or {}
-    for entry in parsed.entries:
-        if entry.get("id") != guid:
+    for issue in GITHUB_ISSUES:
+        if issue.get("node_id") != node_id:
             continue
-        payload: dict[str, Any] = dict(_jsonable(dict(entry)))
-        payload["enclosures"] = _jsonable(list(entry.get("enclosures") or ()))
+        payload: dict[str, Any] = json.loads(json.dumps(issue))
         payload[ENVELOPE_KEY] = {
-            "feed_url": FEED_URL,
-            "feed_title": feed.get("title"),
-            "feed_link": feed.get("link"),
-            "bozo": bool(parsed.get("bozo")),
-            # Host-scoped, as `_author_identity` builds it: "John Smith" writes
-            # for more than one publication.
-            "author_id": "news.example.com:dmitri@news.example.com",
-            # Rule 1 of the identity ladder, derived by the connector in fetch()
-            # so the Kafka reference and the Signal cannot disagree.
-            "native_id": guid,
+            "repository": REPOSITORY,
+            "stream": "issues",
+            "is_pull_request": "pull_request" in issue,
         }
         return payload
-    raise AssertionError(f"no entry {guid!r} in the RSS fixture")
+    raise AssertionError(f"no issue {node_id!r} in the GitHub fixture")
+
+
+def envelope(stream: str | None) -> dict[str, Any]:
+    """The smallest payload the resolver can classify: an envelope and a stream.
+
+    Deliberately not a whole GitHub object. The resolver reads exactly one key,
+    and handing it a full payload would let a test pass because the object
+    happened to look like an issue rather than because the stream said so.
+    """
+    return {ENVELOPE_KEY: {"repository": REPOSITORY, "stream": stream}}
 
 
 def archived_bytes(payload: dict[str, Any]) -> bytes:
@@ -171,18 +156,18 @@ def raw_record_event(payload: dict[str, Any], **overrides: Any) -> RawRecordEven
     """The `omnisense.records.raw` message for this payload."""
     raw = archived_bytes(payload)
     fields: dict[str, Any] = {
-        "platform": Platform.RSS,
-        "native_id": payload[ENVELOPE_KEY]["native_id"],
-        "connector_slug": "rss",
+        "platform": Platform.GITHUB,
+        "native_id": payload["node_id"],
+        "connector_slug": "github",
         "connector_version": "0.1.0",
         "sync_run_id": "run_01J8XN5Q2P",
         "fetched_at": dt.datetime(2026, 7, 27, 8, 0, tzinfo=dt.UTC),
-        "raw_object_key": f"raw/rss/2026/07/27/{hashlib.sha256(raw).hexdigest()}.json",
+        "raw_object_key": f"raw/github/2026/07/27/{hashlib.sha256(raw).hexdigest()}.json",
         "raw_sha256": hashlib.sha256(raw).hexdigest(),
         "raw_bytes": len(raw),
         "raw_content_type": "application/json",
-        "source_url": FEED_URL,
-        "request_fingerprint": "rss:news.example.com/feed.xml",
+        "source_url": f"https://api.github.com/repos/{REPOSITORY}/issues",
+        "request_fingerprint": "github:GET /repos/{owner}/{repo}/issues?state=all",
     }
     fields.update(overrides)
     return RawRecordEvent(**fields)
@@ -335,7 +320,7 @@ class TestFullPipeline:
             embedder=embedder,
             sink=sink,
         )
-        return await pipeline.run(context_for(rss_entry_payload()))
+        return await pipeline.run(context_for(github_issue_payload()))
 
     async def test_every_stage_succeeds_and_the_signal_is_enriched(
         self, result: PipelineResult
@@ -375,21 +360,31 @@ class TestFullPipeline:
         assert signal is not None
 
         assert signal.id.startswith("sig_")
-        assert signal.source is SourceCategory.NEWS
-        assert signal.platform is Platform.RSS
-        assert signal.url == "https://news.example.com/2026/07/27/self-hosted-migration"
+        assert signal.source is SourceCategory.ENTERPRISE
+        assert signal.platform is Platform.GITHUB
+        # `html_url`, never `url`: the latter is the API endpoint, and a citation
+        # that resolves to api.github.com answers a browser with JSON.
+        assert signal.url == "https://github.com/omnisense/omnisense/issues/4166"
+        # `user.node_id`, never `user.login`. Logins are renameable and the rename
+        # rewrites every URL containing one, forking an author's history silently.
         assert signal.author is not None
-        assert signal.author.platform_author_id == "news.example.com:dmitri@news.example.com"
-        assert signal.author.display_name == "Dmitri Sokolov"
-        # Event time at the source, from `<pubDate>`, not ingestion time.
+        assert signal.author.platform_author_id == "MDQ6VXNlcjE0ODEyMzM="
+        assert signal.author.handle == "dsokolov"
+        # Event time at the source, from `created_at`, not `updated_at` -- an issue
+        # stamped with the moment somebody added a label files a three-year-old bug
+        # report as today's news.
         assert signal.timestamp == dt.datetime(2026, 7, 27, 7, 5, tzinfo=dt.UTC)
-        assert signal.content.title == "We moved forty services off hosted observability"
-        assert signal.content.text.startswith("We moved forty services onto self-hosted")
+        assert signal.content.title == (
+            "Scheduler drops queued jobs when the leader restarts mid-lease"
+        )
+        assert signal.content.text.startswith("We moved forty services onto the self-hosted")
         assert signal.content.char_count == len(signal.content.text)
-        # `content:encoded` is the full article by definition, never a teaser.
+        # The whole body, as GitHub stores it -- an issue is never a teaser.
         assert signal.content.truncated is False
-        # The markup is gone: an unstripped `<article>` would reach the embedding.
-        assert "<" not in signal.content.text
+        # Markdown reaches the embedding intact rather than through
+        # `extract_readable`, which would strip nothing and could mangle the fenced
+        # code blocks that are most of what a bug report is made of.
+        assert "`reaper: 0 orphans`" in signal.content.text
         assert signal.media == []
 
     async def test_fields_fifteen_and_seventeen_come_from_the_payload(
@@ -397,20 +392,32 @@ class TestFullPipeline:
     ) -> None:
         """Engagement counters and the namespaced metadata overflow.
 
-        RSS publishes no counters, so `raw` is legitimately empty and the axes
-        stay `None` -- an honest "unknown" rather than a 0.0 that retrieval would
-        read as "nobody engaged". Metadata keys must all be platform-namespaced;
-        an un-namespaced one collides across connectors in one jsonb column.
+        Every counter is GitHub's raw number. The *normalized* axes stay `None`
+        because they are percentiles within a `(platform, content_type)` cohort and
+        stage 2 holds one record -- an honest "not computed here" rather than a 0.0
+        that retrieval would read as "nobody engaged". Metadata keys must all be
+        platform-namespaced; an un-namespaced one collides across connectors in one
+        jsonb column.
         """
         signal = result.signal
         assert signal is not None
 
-        assert signal.engagement.raw == {}
+        assert signal.engagement.raw == {
+            "comments": 7,
+            "reactions": 12,
+            "reactions_plus_one": 9,
+        }
         assert signal.engagement.available_axes() == {}
-        assert signal.metadata["rss.feed_url"] == FEED_URL
-        assert signal.metadata["rss.guid"] == FULL_BODY_GUID
-        assert signal.metadata["rss.categories"] == ["case study"]
-        assert all(key.startswith("rss.") for key in signal.metadata)
+        assert signal.metadata["github.repository"] == REPOSITORY
+        assert signal.metadata["github.stream"] == "issues"
+        assert signal.metadata["github.number"] == 4166
+        assert signal.metadata["github.state"] == "open"
+        # `_label_names` flattens GitHub's label objects to their names; the raw
+        # objects carry ids and colours no consumer of this column wants.
+        assert signal.metadata["github.labels"] == ["bug", "area/scheduler"]
+        # The plain issue, so `fetch()` recorded False rather than omitting the key.
+        assert signal.metadata["github.is_pull_request"] is False
+        assert all(key.startswith("github.") for key in signal.metadata)
 
     async def test_identity_matches_the_record_that_produced_it(
         self, result: PipelineResult
@@ -425,8 +432,8 @@ class TestFullPipeline:
         """
         signal = result.signal
         assert signal is not None
-        assert signal.lineage.native_id == FULL_BODY_GUID
-        assert signal.id == raw_record_event(rss_entry_payload()).partition_key
+        assert signal.lineage.native_id == ISSUE_NODE_ID
+        assert signal.id == raw_record_event(github_issue_payload()).partition_key
 
     async def test_lineage_records_the_run_that_produced_it(
         self, result: PipelineResult
@@ -443,11 +450,13 @@ class TestFullPipeline:
 
         assert lineage.pipeline_version == "1.4.0"
         assert lineage.pipeline_version != UNENRICHED_PIPELINE_VERSION
-        assert lineage.connector_slug == "rss"
+        assert lineage.connector_slug == "github"
         assert lineage.connector_version == "0.1.0"
         assert lineage.sync_run_id == "run_01J8XN5Q2P"
         assert lineage.fetched_at == dt.datetime(2026, 7, 27, 8, 0, tzinfo=dt.UTC)
-        assert lineage.request_fingerprint == "rss:news.example.com/feed.xml"
+        assert lineage.request_fingerprint == (
+            "github:GET /repos/{owner}/{repo}/issues?state=all"
+        )
 
     async def test_the_archived_original_is_addressable_from_the_signal(
         self, result: PipelineResult
@@ -461,7 +470,7 @@ class TestFullPipeline:
         """
         signal = result.signal
         assert signal is not None
-        event = raw_record_event(rss_entry_payload())
+        event = raw_record_event(github_issue_payload())
 
         assert signal.lineage.raw_object_key == event.raw_object_key
         assert signal.content.raw_ref == event.raw_object_key
@@ -564,7 +573,7 @@ class TestFullPipeline:
         assert row.content_text == signal.content.text
         assert row.pipeline_version == "1.4.0"
         assert row.status is SignalStatus.ENRICHED
-        assert row.native_id == FULL_BODY_GUID
+        assert row.native_id == ISSUE_NODE_ID
         # Written NULL on every write so a crash before the Qdrant upsert
         # self-heals through the reconciler rather than being believed indexed.
         assert row.indexed_vector_at is None
@@ -637,7 +646,7 @@ class TestNormalizeStage:
         the failure has to name that rather than surface as a `KeyError` inside
         a field map.
         """
-        ctx = context_for(rss_entry_payload(), record=None)
+        ctx = context_for(github_issue_payload(), record=None)
         with pytest.raises(NormalizationError, match="RawRecordEvent"):
             await normalize(ctx)
 
@@ -648,7 +657,7 @@ class TestNormalizeStage:
         Signal with a plausible id and an empty body, which retrieval still
         returns and a report still quotes.
         """
-        payload = rss_entry_payload()
+        payload = github_issue_payload()
         ctx = context_for(payload, record=raw_record_event(payload, connector_slug="mastodon"))
         with pytest.raises(NormalizationError, match="mastodon"):
             await normalize(ctx)
@@ -661,10 +670,10 @@ class TestNormalizeStage:
         two identities across five stores, discovered later as duplicate rows
         nobody can reconcile.
         """
-        payload = rss_entry_payload()
+        payload = github_issue_payload()
         ctx = context_for(
             payload,
-            record=raw_record_event(payload, native_id="tag:news.example.com,2026:post-9999"),
+            record=raw_record_event(payload, native_id="I_kwDOABCD1M6ZZZZZZ"),
         )
         with pytest.raises(NormalizationError, match="two identities"):
             await normalize(ctx)
@@ -672,7 +681,7 @@ class TestNormalizeStage:
     async def test_a_payload_the_worker_never_read_is_refused(self) -> None:
         """Distinguished from an unmapped slug: this is a worker that did not
         read R2, not code that was never written."""
-        payload = rss_entry_payload()
+        payload = github_issue_payload()
         ctx = EnrichmentContext(
             content_type="application/json",
             payload={},
@@ -690,7 +699,7 @@ class TestNormalizeStage:
         pipeline = SignalPipeline(
             [CleaningStage(), NormalizeStage(), StoreStage(session_factory, publisher)]
         )
-        payload = rss_entry_payload()
+        payload = github_issue_payload()
         result = await pipeline.run(
             context_for(payload, record=raw_record_event(payload, connector_slug="mastodon"))
         )
@@ -711,7 +720,7 @@ class TestNormalizeStage:
         lose `store.py`'s `pipeline_version` guard, and `docs/signal-model.md` §7
         makes the field the basis for deciding what needs reprocessing.
         """
-        ctx = context_for(rss_entry_payload(), pipeline_version="2.10.3")
+        ctx = context_for(github_issue_payload(), pipeline_version="2.10.3")
         await normalize(ctx)
 
         signal = ctx.require_signal()
@@ -721,7 +730,7 @@ class TestNormalizeStage:
         """Stage 1 writes `""` for a JSON payload -- "cleaned, and there is no
         document body". Adopting that as the body would empty `content.text` for
         every JSON source in the system."""
-        ctx = context_for(rss_entry_payload())
+        ctx = context_for(github_issue_payload())
         await normalize(ctx)
 
         assert ctx.cleaned_text == ""
@@ -738,10 +747,10 @@ class TestNormalizeStage:
         `Content` whose count belonged to the other body misleads every consumer
         that reads it.
         """
-        payload = rss_entry_payload()
+        payload = github_issue_payload()
         article = (
-            "<html><body><article><p>Reach the desk at desk@news.example.com "
-            "for corrections to this migration report.</p></article></body></html>"
+            "<html><body><article><p>Reach the maintainers at desk@news.example.com "
+            "for corrections to this report.</p></article></body></html>"
         )
         ctx = EnrichmentContext(
             raw_bytes=article.encode("utf-8"),
@@ -760,76 +769,129 @@ class TestNormalizeStage:
 
 
 class TestDefaultFieldMapResolver:
-    """One resolver, four shipped connectors, and the payload-dependent choices."""
+    """One resolver, one slug, three maps, and the choice between them.
 
-    def test_it_covers_every_shipped_connector(self) -> None:
-        for slug, platform in (
-            ("rss", Platform.RSS),
-            ("news_api", Platform.NEWS_API),
-            ("gdelt", Platform.GDELT),
-            ("reddit", Platform.REDDIT),
-        ):
-            field_map = default_field_map_resolver(slug, {"kind": "t3"})
-            assert field_map is not None, slug
-            assert field_map.platform is platform
+    The table is short because a `FieldMap` earns its place only where a
+    connector emits several payload shapes -- see `_shipped_selectors`. GitHub is
+    the only one that does, and every other shipped slug resolving to `None` is
+    the documented answer rather than a hole.
+    """
+
+    def test_it_covers_every_github_stream(self) -> None:
+        """All three, and each declaring GitHub. A map that resolved but named
+        another platform would build a Signal whose `source` is derived from the
+        wrong category and file a repository issue under `NEWS`."""
+        for stream in ("issues", "discussions", "releases"):
+            field_map = default_field_map_resolver("github", envelope(stream))
+            assert field_map is not None, stream
+            assert field_map.platform is Platform.GITHUB
 
     def test_an_unknown_slug_resolves_to_none(self) -> None:
         """`None`, not an exception: the stage attaches the `native_id` to the
         error, and a DLQ record nobody can attribute is one nobody can replay."""
         assert default_field_map_resolver("mastodon", {}) is None
 
-    def test_reddit_selects_its_map_from_the_payload_kind(self) -> None:
-        """One slug, two maps. A comment has no title and its body is at
-        `data.body`; a post's is at `data.selftext`. Mapping one as the other
-        silently empties every comment in the corpus."""
-        post = default_field_map_resolver("reddit", {"kind": "t3"})
-        comment = default_field_map_resolver("reddit", {"kind": "t1"})
+    def test_a_connector_that_does_not_map_by_table_resolves_to_none(self) -> None:
+        """Jira, Slack and the rest build their `Signal` directly in `normalize()`.
 
-        assert post is not None and post.text is not None
-        assert comment is not None and comment.text is not None
-        assert post.text.paths == ("data.selftext",)
-        assert comment.text.paths == ("data.body",)
-        assert post.title is not None
-        assert comment.title is None
+        `None` here means "not normalized by field map", which is a different
+        thing from "unknown connector" and produces the same outcome by design:
+        the pipeline's rebuild path is only for connectors that have a map to
+        rebuild from.
+        """
+        for slug in ("jira", "slack", "confluence", "notion", "arxiv"):
+            assert default_field_map_resolver(slug, {}) is None, slug
 
-    def test_an_unmappable_reddit_kind_resolves_to_none(self) -> None:
-        """`kind` is a closed set; a new one is a payload shape nobody mapped."""
-        assert default_field_map_resolver("reddit", {"kind": "t6"}) is None
-        assert default_field_map_resolver("reddit", {}) is None
+    def test_the_stream_selects_the_map_and_the_streams_genuinely_differ(self) -> None:
+        """One slug, three maps. An issue's body is at `body` and its timestamp at
+        `created_at`; a discussion is GraphQL and uses `createdAt`; a release is
+        dated by `published_at` because `created_at` is when the *tag* was cut,
+        which for a release published from an old tag can be years earlier.
 
-    def test_rss_selects_by_where_the_body_came_from(self) -> None:
-        """Atom `<content>` is a whole article; a `<summary>` may be a teaser,
-        and `truncated` caps `content_integrity` for the life of the Signal."""
-        full = default_field_map_resolver("rss", rss_entry_payload(FULL_BODY_GUID))
-        teaser = default_field_map_resolver(
-            "rss", rss_entry_payload("tag:news.example.com,2026:post-4181")
-        )
+        Mapping one as another does not fail -- it produces a Signal with a
+        plausible id, an empty body and a wrong date, which retrieval still
+        returns and a report still quotes.
+        """
+        issues = default_field_map_resolver("github", envelope("issues"))
+        discussions = default_field_map_resolver("github", envelope("discussions"))
+        releases = default_field_map_resolver("github", envelope("releases"))
 
-        assert full is not None and full.truncated is False
-        assert teaser is not None and teaser.truncated is True
+        assert issues is not None and issues.timestamp.paths == ("created_at",)
+        assert discussions is not None and discussions.timestamp.paths == ("createdAt",)
+        assert releases is not None and releases.timestamp.paths == ("published_at",)
+        # A release has no author-facing title of its own; `name` falls back to
+        # `tag_name`, which is the one map here with a two-path title.
+        assert releases.title is not None
+        assert releases.title.paths == ("name", "tag_name")
 
-    async def test_it_maps_a_reddit_post_from_the_real_listing_fixture(self) -> None:
-        """The resolver is not RSS-shaped: a second connector, a second payload
-        layout, and the same stage builds a valid Signal from it."""
-        child = REDDIT_LISTING["data"]["children"][0]
+    def test_an_unmapped_stream_resolves_to_none(self) -> None:
+        """`STREAMS` is a closed set. A stream this table has never seen is a
+        payload shape nobody mapped, and the connector's own `normalize()` raises
+        on it for the same reason."""
+        assert default_field_map_resolver("github", envelope("commits")) is None
+        assert default_field_map_resolver("github", envelope(None)) is None
+
+    def test_a_payload_without_the_envelope_resolves_to_none(self) -> None:
+        """The stream lives in the envelope, never in the GitHub object.
+
+        A payload that arrived without one did not come through this connector's
+        `fetch()`, and guessing the stream from the object's shape would
+        misclassify an issue as a discussion -- they are structurally similar
+        enough for the guess to look right.
+        """
+        assert default_field_map_resolver("github", {}) is None
+        assert default_field_map_resolver("github", {ENVELOPE_KEY: "issues"}) is None
+
+    async def test_it_maps_a_discussion_from_the_graphql_shape(self) -> None:
+        """The resolver is not issue-shaped: a second stream, a camelCase payload
+        layout from an entirely different API, and the same stage builds a valid
+        Signal from it.
+
+        This is the assertion that the stream key is doing real work. Were the
+        resolver returning the issue map for everything, this payload would map to
+        an empty body and a missing timestamp rather than to the discussion below.
+        """
+        payload = {
+            "id": "D_kwDOABCD1M4APqZ3",
+            "number": 812,
+            "title": "RFC: drive the reaper off the lease epoch",
+            "body": "Splitting this out of #4166 so the design has somewhere to live.",
+            "url": "https://github.com/omnisense/omnisense/discussions/812",
+            "createdAt": "2026-07-29T09:15:00Z",
+            "updatedAt": "2026-07-29T13:40:00Z",
+            "author": {
+                "id": "MDQ6VXNlcjE0ODEyMzM=",
+                "login": "dsokolov",
+                "url": "https://github.com/dsokolov",
+            },
+            "category": {"name": "Design"},
+            "isAnswered": False,
+            "upvoteCount": 18,
+            "comments": {"totalCount": 5},
+            "reactions": {"totalCount": 9},
+            ENVELOPE_KEY: {"repository": REPOSITORY, "stream": "discussions"},
+        }
         event = RawRecordEvent(
-            platform=Platform.REDDIT,
-            native_id=child["data"]["name"],
-            connector_slug="reddit",
+            platform=Platform.GITHUB,
+            native_id="D_kwDOABCD1M4APqZ3",
+            connector_slug="github",
             connector_version="0.1.0",
             sync_run_id="run_2",
         )
-        ctx = EnrichmentContext(payload=child, record=event, content_type="application/json")
+        ctx = EnrichmentContext(payload=payload, record=event, content_type="application/json")
         await normalize(ctx)
 
         signal = ctx.require_signal()
-        assert signal.platform is Platform.REDDIT
-        assert signal.lineage.native_id == "t3_p1a"
-        assert signal.content.text.startswith("Six weeks in.")
+        assert signal.platform is Platform.GITHUB
+        assert signal.lineage.native_id == "D_kwDOABCD1M4APqZ3"
+        assert signal.content.text.startswith("Splitting this out of")
+        # `author.id` from GraphQL *is* the REST `node_id` -- the same author
+        # identity as the issue above, reached by a different path.
         assert signal.author is not None
-        assert signal.author.platform_author_id == "t2_9xk3q"
-        assert signal.engagement.raw["score"] == 412
-        assert signal.metadata["reddit.subreddit"] == "selfhosted"
+        assert signal.author.platform_author_id == "MDQ6VXNlcjE0ODEyMzM="
+        assert signal.timestamp == dt.datetime(2026, 7, 29, 9, 15, tzinfo=dt.UTC)
+        assert signal.engagement.raw["upvotes"] == 18
+        assert signal.metadata["github.category"] == "Design"
 
 
 # --------------------------------------------------------------------------- #

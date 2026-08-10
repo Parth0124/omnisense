@@ -39,9 +39,7 @@ from typing import TYPE_CHECKING, Any
 
 from agents.base import BaseAgent, PromptSource, TraceSink
 from agents.collector.agent import CollectorAgent
-from agents.competitor.agent import CompetitorAgent
 from agents.critic.agent import CriticAgent
-from agents.forecast.agent import ForecastAgent
 from agents.graph import NodeCallable, build_investigation_graph
 from agents.insight.agent import InsightAgent
 from agents.planner.agent import PlannerAgent
@@ -50,7 +48,6 @@ from agents.retriever.agent import RetrieverAgent
 from agents.router import NODE_AGENT, NodeName
 from agents.state import GraphContext, InvestigationState
 from agents.strategy.agent import StrategyAgent
-from agents.trend.agent import TrendAgent
 from backend.core.config import Settings, get_settings
 from backend.core.logging import get_logger
 from models.enums import AgentName
@@ -74,9 +71,6 @@ AGENT_CLASSES: tuple[type[BaseAgent], ...] = (
     PlannerAgent,
     CollectorAgent,
     RetrieverAgent,
-    TrendAgent,
-    CompetitorAgent,
-    ForecastAgent,
     InsightAgent,
     StrategyAgent,
     CriticAgent,
@@ -364,10 +358,6 @@ def _toolset_factories() -> dict[str, Any]:
 
         return GraphToolset(reader=load_graph_service(), tenant_id="default")
 
-    def analytics(settings: Settings) -> Any:
-        from agents.tools.analytics_tools import build_analytics_toolset
-
-        return build_analytics_toolset()
 
     def connectors(settings: Settings) -> Any:
         from agents.tools.connector_tools import build_connector_toolset
@@ -377,6 +367,5 @@ def _toolset_factories() -> dict[str, Any]:
     return {
         "retrieval": retrieval,
         "graph": graph,
-        "analytics": analytics,
         "connectors": connectors,
     }

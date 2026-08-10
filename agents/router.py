@@ -74,7 +74,6 @@ __all__ = [
     "route_after_report",
     "route_after_retriever",
     "route_after_strategy",
-    "route_after_trend",
     "terminal_status",
 ]
 
@@ -98,9 +97,6 @@ class NodeName(enum.StrEnum):
     COLLECTOR = "collector"
     RETRIEVER = "retriever"
     GRAPH_EXPANSION = "graph_expansion"
-    TREND = "trend"
-    COMPETITOR = "competitor"
-    FORECAST = "forecast"
     INSIGHT = "insight"
     STRATEGY = "strategy"
     CRITIC = "critic"
@@ -108,12 +104,33 @@ class NodeName(enum.StrEnum):
     CRITIC_FINAL = "critic_final"
 
 
-ANALYSIS_BRANCHES: Final[dict[AgentName, NodeName]] = {
-    AgentName.TREND: NodeName.TREND,
-    AgentName.COMPETITOR: NodeName.COMPETITOR,
-    AgentName.FORECAST: NodeName.FORECAST,
-}
-"""The fan-out. Only these three run concurrently, and only when the plan says so."""
+ANALYSIS_BRANCHES: Final[dict[AgentName, NodeName]] = {}
+"""The fan-out: agents that may run concurrently when the plan names them.
+
+**Empty right now, and deliberately kept rather than deleted.** The three market
+agents that used to live here (Trend, Competitor, Forecast) went with the pivot,
+so the graph is currently linear -- Planner through Report with no branch.
+
+It stays because the developer platform gets its own fan-out -- research,
+delegation and diagnosis are independent once a plan names them -- and rebuilding
+guard-aware concurrent dispatch and the join would be a fortnight of re-deriving
+decisions that are already made and tested here.
+
+**What survived the pivot and what did not.** `dispatch_analysis` still selects
+only the branches a plan named, still consults the guard before fanning out, and
+still emits them in this table's canonical order so the downstream prompt-cache
+prefix is stable. What went with the market agents is *dependency
+serialisation*: `depends_on` was honoured by each branch's own outbound edge
+(`route_after_trend` sent the run to Forecast when the plan declared Forecast
+depended on it), and those edges were deleted with their nodes. Today every
+planned branch is dispatched in one superstep regardless of `depends_on`. With an
+empty table that is unobservable, but the first branch added here inherits it, so
+whoever adds the second branch owns re-deriving the serialisation rather than
+assuming it is still in place.
+
+An empty table means `dispatch_analysis` routes straight to Insight, which is the
+correct behaviour for a linear graph rather than a special case.
+"""
 
 NODE_AGENT: Final[dict[NodeName, AgentName]] = {
     NodeName.PLANNER: AgentName.PLANNER,
@@ -124,9 +141,6 @@ NODE_AGENT: Final[dict[NodeName, AgentName]] = {
     # member. Attributing its errors to the Retriever would blame the wrong
     # failure domain, which is the one thing the node exists to keep separate.
     NodeName.GRAPH_EXPANSION: AgentName.UNKNOWN,
-    NodeName.TREND: AgentName.TREND,
-    NodeName.COMPETITOR: AgentName.COMPETITOR,
-    NodeName.FORECAST: AgentName.FORECAST,
     NodeName.INSIGHT: AgentName.INSIGHT,
     NodeName.STRATEGY: AgentName.STRATEGY,
     NodeName.CRITIC: AgentName.CRITIC,
@@ -358,23 +372,6 @@ def _planned_branches(state: InvestigationState) -> list[NodeName]:
     return [node for agent, node in ANALYSIS_BRANCHES.items() if agent in named]
 
 
-def _forecast_waits_for_trend(state: InvestigationState) -> bool:
-    """Whether the plan makes Forecast depend on a step the Trend agent owns.
-
-    §8: the two are concurrent *except* when the plan asks Forecast to project a
-    trend Trend has not detected yet, in which case the router serialises them.
-    Detected structurally from `depends_on` rather than from prose, so a plan
-    that merely mentions both still fans out.
-    """
-    steps = _plan(state)
-    trend_ids = {step.id for step in steps if step.agent == AgentName.TREND}
-    if not trend_ids:
-        return False
-    return any(
-        step.agent == AgentName.FORECAST and trend_ids.intersection(step.depends_on)
-        for step in steps
-    )
-
 
 # --------------------------------------------------------------------------- #
 # Edges
@@ -430,32 +427,14 @@ def dispatch_analysis(
     - **no branches named** -- the plan is retrieval-only, so the run goes
       straight to Insight. Dispatching all three "just in case" would spend three
       model calls to produce three empty slices.
-    - **Forecast serialised behind Trend** -- excluded here and dispatched by
-      `route_after_trend` instead, so it is never scheduled twice.
     """
     halt = check_guards(state, settings=settings)
     if halt is not None:
         return [halt.route]
 
     branches = _planned_branches(state)
-    if _forecast_waits_for_trend(state) and NodeName.TREND in branches:
-        branches = [node for node in branches if node is not NodeName.FORECAST]
     return [str(node) for node in branches] or [str(NodeName.INSIGHT)]
 
-
-def route_after_trend(state: InvestigationState, *, settings: AgentSettings | None = None) -> str:
-    """`Trend -> Forecast` when the plan made Forecast depend on it, else the join.
-
-    The only conditional edge inside the fan-out. Every other branch takes a
-    static edge to Insight: a guard-aware conditional on a concurrent branch
-    could have two branches route to two different nodes in the same superstep,
-    which would schedule both and turn one join into two. The node wrapper in
-    `agents/graph.py` is what stops a halted run spending anything in a branch it
-    still has to traverse.
-    """
-    if _forecast_waits_for_trend(state) and NodeName.FORECAST in _planned_branches(state):
-        return NodeName.FORECAST
-    return NodeName.INSIGHT
 
 
 def route_after_graph_expansion(

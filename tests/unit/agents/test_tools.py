@@ -39,14 +39,6 @@ from typing import Any
 import pytest
 
 from agents.errors import ToolExecutionError, ToolNotAllowedError, UnsafeToolOutputError
-from agents.tools.analytics_tools import (
-    MAX_POINTS,
-    AggregateInput,
-    AnalyticsToolset,
-    DescribeInput,
-    FitForecastInput,
-    TimeseriesInput,
-)
 from agents.tools.connector_tools import (
     ConnectorDescriptor,
     ConnectorToolset,
@@ -119,14 +111,6 @@ from services.evidence_service import (
     QuoteVerification,
     ResolvedCitation,
     VerificationOutcome,
-)
-from services.forecast_service import ForecastService
-from services.trend_service import (
-    BurstConfig,
-    Mention,
-    TrendDimension,
-    VolumePoint,
-    VolumeSeries,
 )
 
 pytestmark = pytest.mark.unit
@@ -311,51 +295,6 @@ class FakeGateway:
         )
 
 
-class FakeTrends:
-    """Enough of `TrendService` for the analytics wrappers."""
-
-    def __init__(
-        self,
-        *,
-        series: Sequence[VolumeSeries] = (),
-        mentions: Sequence[Mention] = (),
-    ) -> None:
-        self._series = list(series)
-        self._mentions = list(mentions)
-        self.config = BurstConfig()
-
-    async def volume_series(self, **kwargs: Any) -> list[VolumeSeries]:
-        return list(self._series)
-
-    async def mentions(self, **kwargs: Any) -> list[Mention]:
-        return list(self._mentions)
-
-
-def volume_series(
-    key: str = "latency", *, values: Sequence[int], raw_multiplier: int = 1
-) -> VolumeSeries:
-    bucket = timedelta(hours=24)
-    start = NOW - bucket * len(values)
-    return VolumeSeries(
-        key=key,
-        dimension=TrendDimension.TOPIC,
-        bucket=bucket,
-        window_start=start,
-        window_end=NOW,
-        points=tuple(
-            VolumePoint(
-                bucket_start=start + bucket * index,
-                volume=value,
-                raw_signals=value * raw_multiplier,
-                clusters=value,
-                platforms=(Platform.REDDIT,),
-                signal_ids=tuple(f"s{index}-{n}" for n in range(value)),
-            )
-            for index, value in enumerate(values)
-        ),
-    )
-
-
 def retrieval_toolset(**overrides: Any) -> RetrievalToolset:
     passages = overrides.pop("passages", [passage()])
     return RetrievalToolset(
@@ -386,11 +325,6 @@ def full_registry(**kwargs: Any) -> ToolRegistry:
     return build_default_registry(
         retrieval=retrieval_toolset(**kwargs.pop("retrieval", {})),
         graph=graph_toolset(**kwargs.pop("graph", {})),
-        analytics=AnalyticsToolset(
-            trends=FakeTrends(series=[volume_series(values=[1] * 20)]),
-            forecasts=ForecastService(),
-            clock=lambda: NOW,
-        ),
         connectors=connector_toolset(descriptors, **kwargs.pop("connectors", {})),
     )
 
@@ -812,13 +746,6 @@ class TestResultBounds:
                 )
             )
 
-    def test_a_time_series_request_that_is_too_wide_is_refused_not_truncated(self) -> None:
-        """Truncating a series measures the wrong interval: a topic that went
-        quiet would look flat instead of collapsing."""
-        with pytest.raises(Exception, match=str(MAX_POINTS)):
-            TimeseriesInput(keys=["a"], window_days=365, bucket_hours=1)
-
-
 # =========================================================================== #
 # 4. Injection through tool output
 # =========================================================================== #
@@ -1174,7 +1101,7 @@ class TestGraphTools:
         registry = build_default_registry(graph=graph_toolset(paths=[path]))
         result = asyncio.run(
             registry.invoke(
-                agent=AgentName.COMPETITOR,
+                agent=AgentName.INSIGHT,
                 tool="find_paths",
                 arguments={"source_id": "a", "target_id": "c"},
             )
@@ -1393,123 +1320,6 @@ class TestConnectorTools:
 # =========================================================================== #
 # 8. Analytics tools
 # =========================================================================== #
-
-
-class TestAnalyticsTools:
-    @staticmethod
-    def _registry(series: Sequence[VolumeSeries], mentions: Sequence[Mention] = ()) -> ToolRegistry:
-        return build_default_registry(
-            analytics=AnalyticsToolset(
-                trends=FakeTrends(series=list(series), mentions=list(mentions)),
-                forecasts=ForecastService(),
-                clock=lambda: NOW,
-            )
-        )
-
-    def test_no_tool_accepts_the_numbers_it_is_asked_to_analyse(self) -> None:
-        """§5.6 made structural: an agent names a series, and the tool reads it.
-
-        The Critic can then check mechanically that every figure came back from a
-        recorded call, because there is no argument shape a hallucinated history
-        could have entered through.
-        """
-        for model in (TimeseriesInput, AggregateInput, FitForecastInput, DescribeInput):
-            properties = model.model_json_schema()["properties"]
-            for name, schema in properties.items():
-                if name in {"keys", "key"}:
-                    continue
-                assert "array" not in json.dumps(schema) or name in {"platforms", "keys"}, name
-            assert "values" not in properties
-            assert "history" not in properties
-            assert "observations" not in properties
-
-    def test_a_burst_qualifier_comes_from_the_data(self) -> None:
-        """§5.4 requires the qualifier to come from tool output, not model prose."""
-        registry = self._registry([volume_series(values=[1] * 20 + [40])])
-        result = asyncio.run(
-            registry.invoke(
-                agent=AgentName.TREND, tool="timeseries", arguments={"keys": ["latency"]}
-            )
-        )
-        series = result.data.series[0]
-        assert series.is_bursting is True
-        assert series.peak_z > 0
-
-    def test_duplication_is_visible_so_a_repost_loop_is_not_called_demand(self) -> None:
-        registry = self._registry([volume_series(values=[2] * 10, raw_multiplier=6)])
-        result = asyncio.run(
-            registry.invoke(
-                agent=AgentName.TREND, tool="describe", arguments={"key": "latency"}
-            )
-        )
-        assert result.data.duplication_ratio == pytest.approx(6.0)
-        assert result.data.observations == 10
-
-    def test_describing_a_key_with_no_data_reports_zero_observations(self) -> None:
-        """An empty series is a legitimate answer -- the key was never mentioned."""
-        registry = self._registry([])
-        result = asyncio.run(
-            registry.invoke(agent=AgentName.TREND, tool="describe", arguments={"key": "ghost"})
-        )
-        assert result.data.observations == 0
-
-    def test_forecasting_a_series_that_does_not_exist_is_refused(self) -> None:
-        """The single most dangerous empty result this layer could hand a report."""
-        registry = self._registry([])
-        with pytest.raises(ValidationError, match="nothing to forecast"):
-            asyncio.run(
-                registry.invoke(
-                    agent=AgentName.FORECAST, tool="fit_forecast", arguments={"key": "ghost"}
-                )
-            )
-
-    def test_a_forecast_carries_its_interval_assumptions_and_caveats(self) -> None:
-        """A projection with no stated conditions reads as a fact."""
-        registry = self._registry([volume_series(values=list(range(1, 21)))])
-        result = asyncio.run(
-            registry.invoke(
-                agent=AgentName.FORECAST,
-                tool="fit_forecast",
-                arguments={"key": "latency", "horizon": 5},
-            )
-        )
-        forecast = result.data
-        assert len(forecast.points) == 5
-        assert forecast.assumptions
-        assert all(point.lower <= point.mean <= point.upper for point in forecast.points)
-
-    def test_a_forecast_result_is_never_shrunk_by_the_registry(self) -> None:
-        """Dropping the tail silently shortens the horizon, and a 12-bucket
-        projection reported as 9 buckets is a different claim."""
-        from agents.tools.analytics_tools import ForecastResult
-
-        assert ForecastResult.ITEMS_FIELD is None
-        assert ForecastResult(key="k", method="m", horizon=1, bucket_hours=24,
-                              interval_level=0.8).shrink() is False
-
-    def test_a_forecast_service_without_history_cannot_be_wired(self) -> None:
-        """The only remaining way to forecast would be to accept numbers from the model."""
-        with pytest.raises(ConfigurationError, match="cannot source history"):
-            AnalyticsToolset(forecasts=ForecastService())
-
-    def test_aggregate_counts_deduplicated_volume(self) -> None:
-        """One story reposted forty times must not outweigh forty independent ones."""
-        mentions = [
-            Mention(signal_id=f"s{i}", key="latency", cluster_id="c1",
-                    platform=Platform.REDDIT, at=NOW)
-            for i in range(5)
-        ] + [
-            Mention(signal_id="s9", key="pricing", cluster_id="c2",
-                    platform=Platform.REDDIT, at=NOW)
-        ]
-        registry = self._registry([], mentions)
-        result = asyncio.run(
-            registry.invoke(agent=AgentName.TREND, tool="aggregate", arguments={})
-        )
-        by_label = {group.label: group for group in result.data.groups}
-        assert by_label["latency"].volume == 1
-        assert by_label["latency"].raw_signals == 5
-        assert by_label["pricing"].volume == 1
 
 
 # =========================================================================== #

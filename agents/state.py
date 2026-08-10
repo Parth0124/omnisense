@@ -250,8 +250,6 @@ class InvestigationState(TypedDict, total=False):
     # -- appended by concurrent writers: reducer REQUIRED --------------------
     collection_results: Annotated[list[CollectionResult], operator.add]
     evidence: Annotated[list[EvidenceRef], operator.add]
-    trends: Annotated[list[dict[str, Any]], operator.add]
-    forecasts: Annotated[list[dict[str, Any]], operator.add]
     insights: Annotated[list[dict[str, Any]], operator.add]
     recommendations: Annotated[list[dict[str, Any]], operator.add]
     critique_history: Annotated[list[dict[str, Any]], operator.add]
@@ -259,7 +257,6 @@ class InvestigationState(TypedDict, total=False):
 
     # -- single-writer scalars ------------------------------------------------
     graph_context: GraphContext
-    competitor_view: dict[str, Any] | None
     critique: dict[str, Any] | None
     revision_count: int
     report: dict[str, Any] | None
@@ -302,14 +299,11 @@ def new_state(
         status=InvestigationStatus.QUEUED,
         collection_results=[],
         evidence=[],
-        trends=[],
-        forecasts=[],
         insights=[],
         recommendations=[],
         critique_history=[],
         errors=[],
         graph_context=GraphContext(),
-        competitor_view=None,
         critique=None,
         revision_count=0,
         report=None,

@@ -54,23 +54,19 @@ from backend.core.exceptions import (
     ValidationError,
 )
 from backend.core.logging import get_logger
-from models.enums import EdgeType, EntityType
-
 from graph.client import GraphClient, GraphQueryError, GraphUnavailableError
 from graph.queries import cypher as templates
 from graph.schema.nodes import GraphSchemaError
+from models.enums import EdgeType, EntityType
 
 __all__ = [
     "MAX_SEARCH_LIMIT",
-    "Competitor",
-    "ComplaintTopic",
     "Entity",
     "EntityRef",
     "GraphFactRecord",
     "GraphPath",
     "GraphService",
     "NeighbourSignal",
-    "OwnershipChain",
     "SignalMention",
     "TopicActivity",
     "build_graph_service",
@@ -186,90 +182,10 @@ class Entity:
         )
 
 
-@dataclass(frozen=True, slots=True)
-class Competitor:
-    """A rival, with the evidence that justifies calling it one."""
-
-    id: str
-    name: str
-    type: EntityType
-    strength: float | None
-    basis: str | None
-    market: str | None
-    confidence: float | None
-    evidence_count: int
-    valid_from: datetime | None
-    valid_to: datetime | None
-    citations: tuple[str, ...]
-
-    @property
-    def is_stated(self) -> bool:
-        """Whether the two named each other, rather than merely co-occurring.
-
-        `docs/knowledge-graph.md` §3: a stated rivalry is worth far more in a
-        report than an inferred one, and a report that cannot tell them apart
-        overstates its own evidence.
-        """
-        return self.basis == "stated"
-
-    @classmethod
-    def from_row(cls, row: dict[str, Any]) -> Competitor:
-        raw_type = row.get("type")
-        return cls(
-            id=str(row.get("id", "")),
-            name=str(row.get("name") or ""),
-            type=EntityType(raw_type) if isinstance(raw_type, str) else EntityType.UNKNOWN,
-            strength=_as_float(row.get("strength")),
-            basis=row.get("basis") if isinstance(row.get("basis"), str) else None,
-            market=row.get("market") if isinstance(row.get("market"), str) else None,
-            confidence=_as_float(row.get("confidence")),
-            evidence_count=_as_int(row.get("evidence_count")),
-            valid_from=_as_datetime(row.get("valid_from")),
-            valid_to=_as_datetime(row.get("valid_to")),
-            citations=_as_str_list(row.get("citations")),
-        )
 
 
-@dataclass(frozen=True, slots=True)
-class ComplaintTopic:
-    topic_id: str
-    topic: str
-    complaints: int
-    avg_severity: float | None
-    avg_sentiment: float | None
-    example_signals: tuple[str, ...]
-
-    @classmethod
-    def from_row(cls, row: dict[str, Any]) -> ComplaintTopic:
-        return cls(
-            topic_id=str(row.get("topic_id", "")),
-            topic=str(row.get("topic") or ""),
-            complaints=_as_int(row.get("complaints")),
-            avg_severity=_as_float(row.get("avg_severity")),
-            avg_sentiment=_as_float(row.get("avg_sentiment")),
-            example_signals=_as_str_list(row.get("example_signals")),
-        )
 
 
-@dataclass(frozen=True, slots=True)
-class OwnershipChain:
-    """Who ultimately owns a company, root first."""
-
-    chain_ids: tuple[str, ...]
-    names: tuple[str, ...]
-    hops: int
-
-    @property
-    def ultimate_owner(self) -> str | None:
-        return self.names[0] if self.names else None
-
-    @classmethod
-    def from_row(cls, row: dict[str, Any]) -> OwnershipChain:
-        return cls(
-            chain_ids=_as_str_list(row.get("chain_ids")),
-            names=_as_str_list(row.get("ownership_chain")),
-            hops=_as_int(row.get("hops")),
-        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -494,88 +410,8 @@ class GraphService:
             raise NotFoundError.for_resource("entity", entity_id)
         return Entity.from_row(rows[0])
 
-    async def competitors(
-        self,
-        *,
-        tenant_id: str,
-        name: str,
-        as_of: datetime | None = None,
-        min_confidence: float = 0.0,
-        min_strength: float = 0.0,
-        limit: int = templates.DEFAULT_LIMIT,
-        allow_degraded: bool = False,
-    ) -> list[Competitor]:
-        """Rivals of a company or product, valid at an instant.
 
-        `as_of` defaults to now, which makes the common call read naturally --
-        and the parameter exists because the interesting question is usually
-        historical: "who did we think competed with them when we wrote that
-        report" is answerable, and that is the whole point of storing intervals.
-        """
-        rows = await self._fetch(
-            lambda: templates.competitors_of(
-                tenant_id=tenant_id,
-                name=name,
-                as_of=as_of,
-                min_confidence=min_confidence,
-                min_strength=min_strength,
-                limit=limit,
-            ),
-            operation="competitors",
-            allow_degraded=allow_degraded,
-        )
-        return [Competitor.from_row(row) for row in rows]
 
-    async def complaint_topics(
-        self,
-        *,
-        tenant_id: str,
-        product: str,
-        window_days: int = 30,
-        min_salience: float = 0.3,
-        limit: int = 10,
-        allow_degraded: bool = False,
-    ) -> list[ComplaintTopic]:
-        """Topics driving complaints about a product, over a recent window."""
-        rows = await self._fetch(
-            lambda: templates.complaint_topics_for_product(
-                tenant_id=tenant_id,
-                product=product,
-                window_days=window_days,
-                min_salience=min_salience,
-                limit=limit,
-            ),
-            operation="complaint_topics",
-            allow_degraded=allow_degraded,
-        )
-        return [ComplaintTopic.from_row(row) for row in rows]
-
-    async def ownership_chain(
-        self,
-        *,
-        tenant_id: str,
-        company_id: str,
-        as_of: datetime | None = None,
-        max_hops: int = templates.MAX_HOPS,
-        allow_degraded: bool = False,
-    ) -> OwnershipChain | None:
-        """Who ultimately owns a company. `None` when nothing acquired it.
-
-        `None` rather than a 404, and rather than a one-element chain: "this
-        company is independent" is a real answer, and dressing it up as a chain
-        of length zero makes every caller check `hops == 0` to discover it.
-        """
-        rows = await self._fetch(
-            lambda: templates.acquisition_chain(
-                tenant_id=tenant_id,
-                company_id=company_id,
-                as_of=as_of,
-                max_hops=max_hops,
-            ),
-            operation="ownership_chain",
-            allow_degraded=allow_degraded,
-        )
-        return OwnershipChain.from_row(rows[0]) if rows else None
 
     async def neighbourhood(
         self,
@@ -847,7 +683,6 @@ def build_graph_service(
     lazy disposer imports.
     """
     from backend.db.neo4j import read_session
-
     from graph.client import (
         DEFAULT_MAX_ATTEMPTS,
         DEFAULT_QUERY_TIMEOUT_SECONDS,

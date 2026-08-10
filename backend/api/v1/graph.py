@@ -37,8 +37,6 @@ from backend.core.exceptions import ValidationError
 from backend.schemas.common import problem_responses
 from backend.schemas.graph import (
     MAX_GRAPH_QUERY_CHARS,
-    CompetitorItem,
-    CompetitorsResponse,
     EntityDetail,
     EntityHit,
     EntitySearchResponse,
@@ -46,16 +44,13 @@ from backend.schemas.graph import (
     GraphNode,
     GraphPathItem,
     GraphPathsResponse,
-    OwnershipChainResponse,
-    RelationshipBasis,
     SignalMentionItem,
     SubgraphRequest,
-    TopicActivityItem,
     SubgraphResponse,
+    TopicActivityItem,
 )
 from models.enums import EntityType
 from services.graph_service import (
-    Competitor,
     Entity,
     GraphFactRecord,
     GraphService,
@@ -120,29 +115,6 @@ def _entity_hit(entity: Entity) -> EntityHit:
         aliases=list(entity.aliases[:5]),
         source_count=entity.source_count,
         score=entity.score,
-    )
-
-
-def _competitor_item(competitor: Competitor) -> CompetitorItem:
-    return CompetitorItem(
-        id=competitor.id,
-        name=competitor.name,
-        type=competitor.type.value,
-        strength=competitor.strength,
-        # `RelationshipBasis` is a plain `StrEnum`, so an unrecognised basis
-        # would raise here and turn one odd edge into a 500 for the whole
-        # response. Mapped explicitly to UNKNOWN instead.
-        basis=(
-            RelationshipBasis(competitor.basis)
-            if competitor.basis in set(RelationshipBasis)
-            else RelationshipBasis.UNKNOWN
-        ),
-        market=competitor.market,
-        confidence=competitor.confidence,
-        evidence_count=competitor.evidence_count,
-        valid_from=competitor.valid_from,
-        valid_to=competitor.valid_to,
-        citations=list(competitor.citations[:5]),
     )
 
 
@@ -215,55 +187,6 @@ async def get_entity(
 
 
 @router.get(
-    "/entities/{name}/competitors",
-    summary="Rivals of a company or product, valid at an instant.",
-    response_model=CompetitorsResponse,
-    responses=problem_responses(401, 403, 422, 503),
-)
-async def get_competitors(
-    name: str,
-    principal: ReaderPrincipal,
-    service: GraphDep,
-    as_of: Annotated[
-        datetime | None,
-        Query(
-            description=(
-                "Read the graph as it was believed at this instant. Defaults to "
-                "now. Must carry a timezone offset."
-            )
-        ),
-    ] = None,
-    min_confidence: Annotated[float, Query(ge=0.0, le=1.0)] = 0.0,
-    limit: Annotated[int, Query(ge=1, le=100)] = 25,
-) -> CompetitorsResponse:
-    """Competitors by name or alias.
-
-    Matched by name rather than by id because that is how a caller arrives here:
-    from a search box or a report, holding a string. Aliases are matched too, so
-    "Big Blue" finds IBM's rivals.
-    """
-    resolved_as_of = as_of or datetime.now(UTC)
-    if as_of is not None and as_of.tzinfo is None:
-        # A naive datetime would be compared against UTC values in Neo4j and be
-        # silently wrong by the server's offset. Rejecting is the only honest
-        # option: guessing UTC would be right in one deployment and wrong in the
-        # next.
-        raise ValidationError("as_of must include a timezone offset, e.g. 2026-08-06T00:00:00Z")
-
-    results = await service.competitors(
-        tenant_id=principal.tenant_id,
-        name=name,
-        as_of=resolved_as_of,
-        min_confidence=min_confidence,
-        limit=limit,
-    )
-    items = [_competitor_item(competitor) for competitor in results]
-    return CompetitorsResponse(
-        subject=name, as_of=resolved_as_of, results=items, total=len(items)
-    )
-
-
-@router.get(
     "/entities/{entity_id}/signals",
     summary="Signals evidencing an entity, most salient first.",
     response_model=list[SignalMentionItem],
@@ -298,42 +221,6 @@ async def get_entity_signals(
         )
         for mention in mentions
     ]
-
-
-@router.get(
-    "/companies/{company_id}/ownership",
-    summary="Who ultimately owns a company, following closed acquisitions.",
-    response_model=OwnershipChainResponse,
-    responses=problem_responses(401, 403, 422, 503),
-)
-async def get_ownership(
-    company_id: str,
-    principal: ReaderPrincipal,
-    service: GraphDep,
-    as_of: Annotated[datetime | None, Query()] = None,
-) -> OwnershipChainResponse:
-    """Follows only *closed* acquisitions.
-
-    Rumoured and announced deals are in the graph, because a rumour is
-    intelligence worth having -- but an ownership chain built through one is a
-    statement of fact about a transaction that may never happen.
-    """
-    resolved_as_of = as_of or datetime.now(UTC)
-    chain = await service.ownership_chain(
-        tenant_id=principal.tenant_id, company_id=company_id, as_of=resolved_as_of
-    )
-    if chain is None:
-        return OwnershipChainResponse(
-            company_id=company_id, as_of=resolved_as_of, is_independent=True
-        )
-    return OwnershipChainResponse(
-        company_id=company_id,
-        as_of=resolved_as_of,
-        chain=list(chain.chain_ids),
-        names=list(chain.names),
-        hops=chain.hops,
-        is_independent=False,
-    )
 
 
 @router.get(

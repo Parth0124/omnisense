@@ -1,4 +1,4 @@
-"""Recomputes forecasts and graph analytics on a schedule.
+"""Recomputes graph analytics on a schedule.
 
 Two jobs that look unrelated and belong together: both are **batch computations
 whose results are read from a property rather than computed on request**, and
@@ -53,7 +53,7 @@ __all__ = [
 
 logger = get_logger(__name__)
 
-WORKER_NAME: Final = "forecast"
+WORKER_NAME: Final = "analytics"
 
 DEFAULT_INTERVAL_SECONDS: Final = 6 * 60 * 60.0
 """Six hours.

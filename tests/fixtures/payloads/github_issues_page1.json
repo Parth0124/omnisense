@@ -1,0 +1,71 @@
+[
+  {
+    "id": 2481903117,
+    "node_id": "I_kwDOABCD1M6TqXyN",
+    "number": 4166,
+    "title": "Scheduler drops queued jobs when the leader restarts mid-lease",
+    "html_url": "https://github.com/omnisense/omnisense/issues/4166",
+    "url": "https://api.github.com/repos/omnisense/omnisense/issues/4166",
+    "state": "open",
+    "state_reason": null,
+    "created_at": "2026-07-27T07:05:00Z",
+    "updated_at": "2026-07-27T07:41:12Z",
+    "closed_at": null,
+    "body": "We moved forty services onto the self-hosted scheduler last quarter and have been chasing an intermittent job loss ever since.\n\nThe reproduction is reliable once you know where to look. A leader holds a lease for thirty seconds and renews it every ten. When the leader process is SIGKILLed inside the renewal window, the successor reads the lease table, sees an expiry still in the future, and waits for it to lapse before claiming. Any job the dead leader had already dequeued but not yet acknowledged sits in the in-flight set for that whole window.\n\nThat much is expected and documented. What is not documented is that the in-flight reaper runs on a fixed thirty-second timer started at process boot, not at claim time. If the successor boots at second twenty-nine of the old lease it reaps once, immediately, before it has claimed anything, then does not run again for another thirty seconds. The orphaned jobs are invisible to it for a full minute.\n\nWe reproduced this against Grafana dashboards showing the queue depth flatline while the in-flight gauge stayed pinned. Loki caught the smoking gun: `reaper: 0 orphans` logged four hundred milliseconds before `claimed lease`, every single time.\n\nThe fix we are running locally is to start the reaper timer after the first successful lease claim rather than at boot. Happy to send that as a PR if the approach sounds right, though I suspect you would rather drive the reaper off the lease epoch than off a wall-clock timer at all.",
+    "user": {
+      "login": "dsokolov",
+      "id": 1481233,
+      "node_id": "MDQ6VXNlcjE0ODEyMzM=",
+      "html_url": "https://github.com/dsokolov",
+      "type": "User"
+    },
+    "labels": [
+      { "id": 8811, "name": "bug", "color": "d73a4a" },
+      { "id": 8812, "name": "area/scheduler", "color": "0e8a16" }
+    ],
+    "comments": 7,
+    "reactions": {
+      "url": "https://api.github.com/repos/omnisense/omnisense/issues/4166/reactions",
+      "total_count": 12,
+      "+1": 9,
+      "-1": 0,
+      "heart": 3
+    },
+    "author_association": "CONTRIBUTOR"
+  },
+  {
+    "id": 2481903990,
+    "node_id": "PR_kwDOABCD1M6QmZ4A",
+    "number": 4181,
+    "title": "fix(scheduler): start the in-flight reaper from the lease epoch",
+    "html_url": "https://github.com/omnisense/omnisense/pull/4181",
+    "url": "https://api.github.com/repos/omnisense/omnisense/issues/4181",
+    "state": "open",
+    "state_reason": null,
+    "created_at": "2026-07-28T11:20:00Z",
+    "updated_at": "2026-07-28T15:02:44Z",
+    "closed_at": null,
+    "body": "Closes #4166.\n\nThe reaper timer is now derived from the lease epoch the successor claims rather than from process boot, so a leader that dies inside the renewal window has its in-flight set swept on the successor's first tick instead of up to a minute later.\n\nOne behavioural change worth calling out in review: the reaper no longer runs at all before a lease is held. That is deliberate -- a process with no lease has no authority to reap anyone's in-flight jobs, and the old code doing it at boot was the bug wearing a hat.",
+    "user": {
+      "login": "dsokolov",
+      "id": 1481233,
+      "node_id": "MDQ6VXNlcjE0ODEyMzM=",
+      "html_url": "https://github.com/dsokolov",
+      "type": "User"
+    },
+    "labels": [{ "id": 8812, "name": "area/scheduler", "color": "0e8a16" }],
+    "comments": 2,
+    "reactions": {
+      "url": "https://api.github.com/repos/omnisense/omnisense/issues/4181/reactions",
+      "total_count": 4,
+      "+1": 4,
+      "-1": 0
+    },
+    "pull_request": {
+      "url": "https://api.github.com/repos/omnisense/omnisense/pulls/4181",
+      "html_url": "https://github.com/omnisense/omnisense/pull/4181",
+      "merged_at": null
+    },
+    "author_association": "CONTRIBUTOR"
+  }
+]

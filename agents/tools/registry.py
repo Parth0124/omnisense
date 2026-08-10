@@ -581,12 +581,9 @@ AGENT_TOOL_ALLOWLIST: Final[Mapping[AgentName, frozenset[str]]] = MappingProxyTy
         AgentName.RETRIEVER: frozenset(
             {"hybrid_search", "fetch_passage", "rerank", "resolve_citation", "neighbours"}
         ),
-        AgentName.TREND: frozenset({"timeseries", "aggregate", "describe", "neighbours"}),
-        AgentName.COMPETITOR: frozenset({"find_paths", "hybrid_search", "aggregate"}),
         # `fit_forecast` is what makes §5.6 structurally enforceable: the model
         # selects a method and writes caveats, and every number in its output
         # has to have come back from this call.
-        AgentName.FORECAST: frozenset({"timeseries", "fit_forecast", "hybrid_search"}),
         # Reasoning over material already gathered. No search: an Insight that
         # could retrieve would answer a question the plan never asked.
         AgentName.INSIGHT: frozenset({"fetch_passage", "find_paths"}),
@@ -924,7 +921,6 @@ def build_default_registry(
     *,
     retrieval: Any = None,
     graph: Any = None,
-    analytics: Any = None,
     connectors: Any = None,
     allowlist: Mapping[AgentName, frozenset[str]] = AGENT_TOOL_ALLOWLIST,
 ) -> ToolRegistry:
@@ -943,7 +939,7 @@ def build_default_registry(
     the one place it reverses.
     """
     specs: list[ToolSpec] = []
-    for toolset in (retrieval, graph, analytics, connectors):
+    for toolset in (retrieval, graph, connectors):
         if toolset is not None:
             specs.extend(toolset.specs())
 

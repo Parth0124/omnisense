@@ -100,15 +100,12 @@ def _load_agents() -> dict[AgentName, type]:
     providers and the tool registry. A route table should not cost that.
     """
     from agents.collector.agent import CollectorAgent
-    from agents.competitor.agent import CompetitorAgent
     from agents.critic.agent import CriticAgent
-    from agents.forecast.agent import ForecastAgent
     from agents.insight.agent import InsightAgent
     from agents.planner.agent import PlannerAgent
     from agents.report.agent import ReportAgent
     from agents.retriever.agent import RetrieverAgent
     from agents.strategy.agent import StrategyAgent
-    from agents.trend.agent import TrendAgent
 
     return {
         agent.name: agent
@@ -116,9 +113,6 @@ def _load_agents() -> dict[AgentName, type]:
             PlannerAgent,
             CollectorAgent,
             RetrieverAgent,
-            TrendAgent,
-            CompetitorAgent,
-            ForecastAgent,
             InsightAgent,
             StrategyAgent,
             CriticAgent,

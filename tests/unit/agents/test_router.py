@@ -23,6 +23,8 @@ no clock dependency here: `check_guards()` takes `now` and every predicate takes
 
 from __future__ import annotations
 
+from collections.abc import Iterator
+from contextlib import contextmanager
 from datetime import timedelta
 from typing import Any
 
@@ -30,6 +32,7 @@ import pytest
 from langgraph.graph import END
 
 from agents.router import (
+    ANALYSIS_BRANCHES,
     HaltReason,
     NodeName,
     check_guards,
@@ -44,7 +47,6 @@ from agents.router import (
     route_after_report,
     route_after_retriever,
     route_after_strategy,
-    route_after_trend,
     terminal_status,
 )
 from agents.state import AgentError, InvestigationState, PlanStep, TokenLedger, new_state
@@ -53,6 +55,28 @@ from models.base import utcnow
 from models.enums import AgentName, InvestigationStatus
 
 pytestmark = pytest.mark.unit
+
+
+@contextmanager
+def registered_branch(agent: AgentName, node: NodeName) -> Iterator[None]:
+    """Temporarily put a branch in `ANALYSIS_BRANCHES`.
+
+    The table is empty since the pivot and the dispatch machinery around it is
+    not -- planned-only selection, dependency serialisation and the deadline
+    guard are all still live code with no data to exercise them. Registering a
+    branch for the duration of a test is what keeps that code covered until the
+    developer platform's own branches land, rather than letting it rot untested
+    and be rediscovered as broken the day something is added.
+
+    Any existing agent will do as the stand-in: `dispatch_analysis` reads the
+    plan's agent names against this table and never calls the node, so the
+    borrowed pairing costs nothing and no node executes.
+    """
+    ANALYSIS_BRANCHES[agent] = node
+    try:
+        yield
+    finally:
+        del ANALYSIS_BRANCHES[agent]
 
 
 SETTINGS = AgentSettings(
@@ -139,35 +163,82 @@ def test_static_edges_still_consult_the_guard() -> None:
         assert edge(expired, settings=SETTINGS) == NodeName.REPORT
 
 
+def test_dispatch_goes_straight_to_insight_while_no_branches_are_registered() -> None:
+    """`ANALYSIS_BRANCHES` is empty today, so every plan joins at Insight.
+
+    Kept as a conditional edge rather than collapsed to a static one. The fan-out
+    machinery -- planned-only dispatch, dependency serialisation, the deadline
+    guard -- is tested below against a temporarily registered branch, because the
+    developer platform's own branches (research, delegation, diagnosis) plug into
+    exactly this table and rebuilding tested dispatch from scratch is expensive in
+    a way that keeping forty lines is not.
+    """
+    for planned in (AgentName.RETRIEVER, AgentName.INSIGHT, AgentName.STRATEGY):
+        state = make_state(plan=plan(("s1", planned, False)))
+        assert dispatch_analysis(state, settings=SETTINGS) == [str(NodeName.INSIGHT)]
+
+
 def test_only_planned_branches_are_dispatched() -> None:
-    state = make_state(plan=plan(("s1", AgentName.TREND, False), ("s2", AgentName.FORECAST, False)))
-    assert dispatch_analysis(state, settings=SETTINGS) == [
-        str(NodeName.TREND),
-        str(NodeName.FORECAST),
-    ]
+    """A branch the plan never asked for costs a model call and produces a
+    section of the report nobody requested."""
+    with registered_branch(AgentName.STRATEGY, NodeName.STRATEGY):
+        planned = make_state(plan=plan(("s1", AgentName.STRATEGY, False)))
+        assert dispatch_analysis(planned, settings=SETTINGS) == [str(NodeName.STRATEGY)]
+
+        unplanned = make_state(plan=plan(("s1", AgentName.RETRIEVER, False)))
+        assert dispatch_analysis(unplanned, settings=SETTINGS) == [str(NodeName.INSIGHT)]
 
 
-def test_a_plan_with_no_analysis_branches_goes_straight_to_insight() -> None:
-    state = make_state(plan=plan(("s1", AgentName.RETRIEVER, False)))
-    assert dispatch_analysis(state, settings=SETTINGS) == [str(NodeName.INSIGHT)]
+def test_branches_dispatch_in_canonical_order_not_plan_order() -> None:
+    """The dispatch list is part of the prompt-cache prefix for the nodes
+    downstream, so an order that varied with the plan's phrasing would invalidate
+    that cache on every run for no behavioural gain."""
+    with registered_branch(AgentName.STRATEGY, NodeName.STRATEGY), registered_branch(
+        AgentName.CRITIC, NodeName.CRITIC
+    ):
+        forwards = plan(("a1", AgentName.STRATEGY, False), ("b1", AgentName.CRITIC, False))
+        backwards = plan(("b1", AgentName.CRITIC, False), ("a1", AgentName.STRATEGY, False))
+        expected = [str(NodeName.STRATEGY), str(NodeName.CRITIC)]
+
+        assert dispatch_analysis(make_state(plan=forwards), settings=SETTINGS) == expected
+        assert dispatch_analysis(make_state(plan=backwards), settings=SETTINGS) == expected
 
 
-def test_forecast_is_serialised_behind_trend_when_the_plan_says_so() -> None:
-    """§8: concurrent by default, sequential when the plan declares the dependency."""
-    steps = [
-        PlanStep(id="t1", description="detect", agent=AgentName.TREND),
-        PlanStep(id="f1", description="project", agent=AgentName.FORECAST, depends_on=("t1",)),
-    ]
-    state = make_state(plan=steps)
+def test_depends_on_no_longer_serialises_a_branch() -> None:
+    """Regression pin on a capability the pivot removed.
 
-    # Dispatched once, by Trend's edge -- never twice.
-    assert dispatch_analysis(state, settings=SETTINGS) == [str(NodeName.TREND)]
-    assert route_after_trend(state, settings=SETTINGS) == NodeName.FORECAST
+    `depends_on` used to be honoured by each branch's own outbound edge, and those
+    edges were deleted with the market agents. Every planned branch now dispatches
+    in one superstep regardless. This is asserted rather than left implicit
+    because it is invisible while the table is empty and inherited silently by the
+    first branch added -- a dependent branch would run against state its
+    predecessor has not written, which does not fail, it answers from nothing.
+    """
+    with registered_branch(AgentName.STRATEGY, NodeName.STRATEGY), registered_branch(
+        AgentName.CRITIC, NodeName.CRITIC
+    ):
+        steps = [
+            PlanStep(id="a1", description="first", agent=AgentName.STRATEGY),
+            PlanStep(
+                id="b1", description="second", agent=AgentName.CRITIC, depends_on=("a1",)
+            ),
+        ]
+        assert dispatch_analysis(make_state(plan=steps), settings=SETTINGS) == [
+            str(NodeName.STRATEGY),
+            str(NodeName.CRITIC),
+        ]
 
 
-def test_trend_joins_directly_when_forecast_is_independent() -> None:
-    state = make_state(plan=plan(("t1", AgentName.TREND, False), ("f1", AgentName.FORECAST, False)))
-    assert route_after_trend(state, settings=SETTINGS) == NodeName.INSIGHT
+def test_an_expired_deadline_skips_dispatch_entirely() -> None:
+    """The guard is consulted on the fan-out edge too. A run past its deadline
+    that still fanned out would spend its remaining budget on branches whose
+    output the Report node has no time left to read."""
+    with registered_branch(AgentName.STRATEGY, NodeName.STRATEGY):
+        expired = make_state(
+            plan=plan(("s1", AgentName.STRATEGY, False)),
+            deadline_at=utcnow() - timedelta(seconds=1),
+        )
+        assert dispatch_analysis(expired, settings=SETTINGS) == [str(NodeName.REPORT)]
 
 
 def test_report_always_hands_off_to_the_final_critic() -> None:
@@ -253,7 +324,7 @@ def test_a_recoverable_branch_failure_does_not_halt_the_run() -> None:
     state = make_state(
         errors=[
             AgentError(
-                agent=AgentName.FORECAST,
+                agent=AgentName.STRATEGY,
                 error_type="provider_error",
                 message="did not converge",
                 recoverable=True,
@@ -274,9 +345,11 @@ def test_the_guard_wins_against_every_edge_predicate() -> None:
         )
         == NodeName.REPORT
     )
-    assert dispatch_analysis(
-        make_state(plan=plan(("t1", AgentName.TREND, False)), **exhausted), settings=SETTINGS
-    ) == [str(NodeName.REPORT)]
+    with registered_branch(AgentName.STRATEGY, NodeName.STRATEGY):
+        assert dispatch_analysis(
+            make_state(plan=plan(("t1", AgentName.STRATEGY, False)), **exhausted),
+            settings=SETTINGS,
+        ) == [str(NodeName.REPORT)]
     assert (
         route_after_critic(make_state(critique=critique("revise"), **exhausted), settings=SETTINGS)
         == NodeName.REPORT
