@@ -25,6 +25,8 @@ to catch a column that should never have been added.
 
 from __future__ import annotations
 
+import importlib
+import pkgutil
 import re
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
@@ -49,6 +51,8 @@ from sqlalchemy import (
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+import models.orm
+from models.artifact import ArtifactKind, ArtifactOutcome, ArtifactState
 from models.enums import (
     AgentName,
     AuthType,
@@ -57,7 +61,20 @@ from models.enums import (
     SignalStatus,
     SourceCategory,
 )
+from models.orm.artifact import ArtifactRow, PersonRow, SourceRow
 from models.orm.base import Base, TolerantEnumType, metadata
+
+# Every assertion below is over `metadata.tables`, so what this module can see
+# depends entirely on which mapping modules have been imported. The explicit
+# imports that follow cover the tables these tests name individually; this walk
+# covers the rest, and is what makes the *cross-cutting* checks -- "every enum
+# column is tolerant", "every foreign key declares an action" -- mean what they
+# say.
+#
+# Without it those checks silently graded a subset. A table whose module nothing
+# else imported was simply absent, and whether it appeared depended on test
+# order: `test_artifact_orm.py` sorts before this file and imports its mappings,
+# so the same assertion passed in a full run and failed when run alone.
 from models.orm.connector_account import (
     ConnectorAccountRow,
     ConnectorAccountStatus,
@@ -74,6 +91,9 @@ from models.orm.report import (
 )
 from models.orm.run import AgentRunRow, RunStatus, TraceRow
 from models.orm.signal import SignalRow
+
+for _module in pkgutil.iter_modules(models.orm.__path__):
+    importlib.import_module(f"{models.orm.__name__}.{_module.name}")
 
 pytestmark = pytest.mark.unit
 
@@ -287,7 +307,58 @@ async def seed_trace(session: AsyncSession) -> TraceRow:
     return await _add(session, make_trace())
 
 
+def make_source() -> SourceRow:
+    return SourceRow(
+        id="src_1",
+        platform=Platform.GITHUB,
+        external_id="R_kgDOABCD1M",
+        name="omnisense/api",
+        default_branch="main",
+    )
+
+
+def make_person() -> PersonRow:
+    return PersonRow(
+        id="per_1",
+        platform=Platform.GITHUB,
+        external_id="MDQ6VXNlcjE=",
+        handle="dsokolov",
+    )
+
+
+def make_artifact() -> ArtifactRow:
+    return ArtifactRow(
+        id="art_1",
+        kind=ArtifactKind.CI_RUN,
+        source_id="src_1",
+        actor_id="per_1",
+        platform=Platform.GITHUB,
+        native_id="WFR_1",
+        title="Run tests",
+        occurred_at=TS,
+        state=ArtifactState.COMPLETED,
+        outcome=ArtifactOutcome.FAILURE,
+    )
+
+
+async def seed_source(session: AsyncSession) -> SourceRow:
+    return await _add(session, make_source())
+
+
+async def seed_person(session: AsyncSession) -> PersonRow:
+    return await _add(session, make_person())
+
+
+async def seed_artifact(session: AsyncSession) -> ArtifactRow:
+    await seed_source(session)
+    await seed_person(session)
+    return await _add(session, make_artifact())
+
+
 SEEDERS: dict[str, Callable[[AsyncSession], Awaitable[Any]]] = {
+    "sources": seed_source,
+    "people": seed_person,
+    "artifacts": seed_artifact,
     "signals": seed_signal,
     "connector_accounts": seed_connector_account,
     "connector_cursors": seed_connector_cursor,
@@ -301,6 +372,9 @@ SEEDERS: dict[str, Callable[[AsyncSession], Awaitable[Any]]] = {
 }
 
 MODELS: dict[str, type[Any]] = {
+    "sources": SourceRow,
+    "people": PersonRow,
+    "artifacts": ArtifactRow,
     "signals": SignalRow,
     "connector_accounts": ConnectorAccountRow,
     "connector_cursors": ConnectorCursorRow,
@@ -567,17 +641,23 @@ class TestEnumColumns:
         assert enum_columns() == [
             ("agent_runs", "agent"),
             ("agent_runs", "status"),
+            ("artifacts", "kind"),
+            ("artifacts", "outcome"),
+            ("artifacts", "platform"),
+            ("artifacts", "state"),
             ("connector_accounts", "auth_type"),
             ("connector_accounts", "platform"),
             ("connector_accounts", "status"),
             ("investigation_steps", "agent"),
             ("investigation_steps", "status"),
             ("investigations", "status"),
+            ("people", "platform"),
             ("reports", "format"),
             ("reports", "status"),
             ("signals", "platform"),
             ("signals", "source"),
             ("signals", "status"),
+            ("sources", "platform"),
         ]
 
     def test_stored_as_plain_varchar_without_a_constraint(self) -> None:
@@ -1013,6 +1093,9 @@ class TestUniqueConstraints:
         }
         assert declared_constraints == {
             "uq_signals_platform_native_id",
+            "uq_artifacts_platform_native_id",
+            "uq_sources_platform_external_id",
+            "uq_people_platform_external_id",
             "uq_connector_cursors_connector_slug_account_id_params_hash",
             "uq_investigation_steps_investigation_id_sequence",
             "uq_reports_investigation_id_version",
@@ -1045,6 +1128,15 @@ EXPECTED_ON_DELETE: dict[str, str] = {
     "fk_agent_runs_investigation_id_investigations": "SET NULL",
     # A span describing a deleted call is unresolvable noise.
     "fk_traces_agent_run_id_agent_runs": "CASCADE",
+    # An artifact whose origin is unknown cannot be cited, and a citation is what
+    # every claim in this system rests on. Deleting a source is a decision about
+    # what happens to its history and has to be made explicitly, not taken as a
+    # side effect -- so RESTRICT rather than CASCADE.
+    "fk_artifacts_source_id_sources": "RESTRICT",
+    # An artifact routinely has no actor at all: a CI run is triggered by a
+    # machine. A deleted account must not take the commits it authored with it,
+    # so the reference is cleared and the work survives.
+    "fk_artifacts_actor_id_people": "SET NULL",
 }
 
 
@@ -1426,6 +1518,12 @@ VECTOR_EXEMPT: dict[tuple[str, str], str] = {
 }
 
 RAW_BODY_EXEMPT: dict[tuple[str, str], str] = {
+    ("artifacts", "body"): (
+        "A commit message, a pull request description, a Slack message. Bounded "
+        "prose the platform's API returns as a field -- not a scraped document. "
+        "It is also the text every 'why did we decide X' answer quotes, so it "
+        "has to be queryable here rather than behind an object-store fetch."
+    ),
     ("signals", "raw_object_key"): "The R2 key. A pointer, not the bytes.",
     ("signals", "raw_sha256"): "Digest of the R2 object, for integrity checks.",
     ("signals", "author_payload"): (

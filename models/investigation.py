@@ -22,7 +22,7 @@ cannot disagree about what is legal.
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Any, Final
+from typing import Final
 
 from pydantic import Field, model_validator
 

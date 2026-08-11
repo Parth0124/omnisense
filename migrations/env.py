@@ -42,6 +42,20 @@ this project owns.
 from __future__ import annotations
 
 import asyncio
+
+# Importing every mapping module is what populates `Base.metadata`. A module that
+# is not imported here contributes no table, and autogenerate -- which compares
+# metadata against the live database -- reads its absence as "this table was
+# dropped" and writes a migration that drops it for real.
+#
+# Walked rather than listed. A hardcoded list fails in the most expensive
+# direction available: adding a mapping module and forgetting this line does not
+# error, it makes autogenerate emit `DROP TABLE` for every table the new module
+# was supposed to add -- or, before the table exists, silently omit it and leave
+# the migration empty. `tests/conftest.py` walks the same package for the same
+# reason.
+import importlib
+import pkgutil
 from logging.config import fileConfig
 from typing import Any
 
@@ -51,14 +65,12 @@ from sqlalchemy import pool, text
 from sqlalchemy.engine import Connection
 from sqlalchemy.ext.asyncio import async_engine_from_config
 
+import models.orm
 from backend.core.config import get_settings
+from models.orm.base import SCHEMA, Base, TolerantEnumType
 
-# Importing every mapping module is what populates `Base.metadata`. A module that
-# is not imported here contributes no table, and autogenerate -- which compares
-# metadata against the live database -- reads its absence as "this table was
-# dropped" and writes a migration that drops it for real.
-from models.orm import connector_account, investigation, report, run, signal  # noqa: F401
-from models.orm.base import SCHEMA, Base
+for _module in pkgutil.iter_modules(models.orm.__path__):
+    importlib.import_module(f"{models.orm.__name__}.{_module.name}")
 
 target_metadata = Base.metadata
 
@@ -77,6 +89,10 @@ if config.config_file_name is not None:
 database_url = get_settings().postgres.url
 
 
+VERSION_TABLE = "alembic_version"
+"""Alembic's revision table. Never a candidate for autogenerate. See `include_name`."""
+
+
 def include_name(
     name: str | None,
     type_: NameFilterType,
@@ -86,13 +102,57 @@ def include_name(
 
     Only `type_="schema"` is filtered. Returning False for a schema excludes
     every object inside it from the comparison, which is exactly the intent: the
-    `checkpoints` schema and PostgreSQL's own `public` are not ours to diff. The
-    `None` case is the default schema, which under `include_schemas=True` is how
-    reflection reports `public`.
+    `checkpoints` schema and PostgreSQL's own `public` are not ours to diff.
+
+    **`None` is excluded, and `do_run_migrations` is what makes that safe.**
+    Reflection reports the connection's *default* schema as `None` rather than by
+    name. The database user here is called `omnisense` and the server default
+    `search_path` is `"$user", public`, so `current_schema()` resolved to
+    `omnisense` -- our own schema arrived as `None`, this function returned False
+    for it, and autogenerate compared our metadata against nothing. It concluded
+    every table was missing and generated a migration that recreated the entire
+    database. That is not hypothetical: it is what the first autogenerate run on
+    this repository produced.
+
+    `None` -- the connection's default schema -- is excluded, and
+    `do_run_migrations` is what makes that correct: it forces our schema to be
+    non-default for the run, so reflection reports it by name and this comparison
+    means what it says.
     """
     if type_ == "schema":
         return name == SCHEMA
-    return True
+    # `alembic_version` is alembic's own bookkeeping. It normally excludes this
+    # itself, but that exclusion is keyed on the version table's schema, and ours
+    # was reported under the default schema rather than by name -- so autogenerate
+    # saw a table present in the database and absent from our metadata, and wrote
+    # `op.drop_table("alembic_version")` into upgrade(). Running that would delete
+    # the record of which migrations have been applied, and the next `upgrade`
+    # would try to create every table again on top of the ones already there.
+    return not (type_ == "table" and name == VERSION_TABLE)
+
+
+def render_item(type_: str, obj: Any, autogen_context: Any) -> str | bool:
+    """Render `TolerantEnumType` as the VARCHAR it actually is.
+
+    Autogenerate renders a custom `TypeDecorator` by its Python path, producing
+    `models.orm.base.TolerantEnumType(length=32)` in the migration -- which fails
+    with `NameError: name 'models' is not defined`, because migrations import
+    only `sqlalchemy` and `alembic`. Adding the import would work and would be
+    worse: the migration would then pin itself to a class that can be renamed or
+    deleted, and a migration that cannot run against an old checkout is not a
+    migration.
+
+    `TolerantEnumType` is a `TypeDecorator` over `String` and stores a plain
+    unconstrained VARCHAR -- deliberately, so that adding an enum member needs no
+    migration at all. Rendering it as `sa.String` is therefore not a
+    simplification; it is what the column has always been. `0001` says the same
+    thing by hand, with a local `_enum()` helper.
+
+    Returning `False` for everything else means "use the default rendering".
+    """
+    if type_ == "type" and isinstance(obj, TolerantEnumType):
+        return f"sa.String(length={obj.impl.length})"
+    return False
 
 
 def _ensure_schemas() -> None:
@@ -127,6 +187,7 @@ def _configure(**kwargs: Any) -> None:
         # that all ten tables are missing.
         include_schemas=True,
         include_name=include_name,
+        render_item=render_item,
         # Keep the revision table beside the tables it versions, so
         # `pg_dump --schema=omnisense` restores to a database Alembic recognizes
         # as already migrated. Left in `public`, a restore comes back with an
@@ -155,10 +216,37 @@ def run_migrations_offline() -> None:
 
 
 def do_run_migrations(connection: Connection) -> None:
-    _configure(connection=connection)
-    with context.begin_transaction():
-        _ensure_schemas()
-        context.run_migrations()
+    # Make our schema non-default *for the duration of this run*, then put the
+    # dialect back.
+    #
+    # SQLAlchemy names the connection's default schema `None` everywhere it
+    # reflects. The database user here is called `omnisense`, the server
+    # `search_path` is `"$user", public`, and a schema called `omnisense` exists
+    # -- so our schema was the default, and reflection described every existing
+    # table and foreign key without a schema while our metadata described them
+    # all with one. Autogenerate compared `artifacts` against
+    # `omnisense.artifacts`, matched nothing, and produced a migration that
+    # recreated the entire database and dropped `alembic_version` on the way.
+    #
+    # `SET search_path` cannot fix this from here: the dialect resolves
+    # `default_schema_name` once, when the engine first connects, and reflection
+    # uses that cached value rather than asking again.
+    #
+    # Restored in `finally` because this connection is not always ours --
+    # `scripts/init_databases.py` and the integration suite hand in a live one
+    # from the application's own engine, and a dialect left mutated would change
+    # how every later query in that process resolves an unqualified name.
+    dialect = connection.dialect
+    previous_default = dialect.default_schema_name
+    if previous_default == SCHEMA:
+        dialect.default_schema_name = "public"
+    try:
+        _configure(connection=connection)
+        with context.begin_transaction():
+            _ensure_schemas()
+            context.run_migrations()
+    finally:
+        dialect.default_schema_name = previous_default
 
 
 async def run_migrations_online() -> None:

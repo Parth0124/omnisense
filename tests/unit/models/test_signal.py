@@ -78,15 +78,11 @@ def signal(lineage: Lineage) -> Signal:
 class TestIdentity:
     def test_is_deterministic(self) -> None:
         """The property that makes every store idempotent."""
-        assert signal_id(Platform.REDDIT, "t3_1abcde") == signal_id(
-            Platform.REDDIT, "t3_1abcde"
-        )
+        assert signal_id(Platform.REDDIT, "t3_1abcde") == signal_id(Platform.REDDIT, "t3_1abcde")
 
     def test_is_stable_across_runs(self) -> None:
         """Pinned literal: a change here silently orphans every stored artifact."""
-        assert signal_id(Platform.REDDIT, "t3_1abcde") == (
-            "sig_af53359fd1835722956a66f1e051c33e"
-        )
+        assert signal_id(Platform.REDDIT, "t3_1abcde") == ("sig_af53359fd1835722956a66f1e051c33e")
 
     def test_is_platform_scoped(self) -> None:
         assert signal_id(Platform.X, "t3_1abcde") != signal_id(Platform.REDDIT, "t3_1abcde")
@@ -471,12 +467,30 @@ class TestEntities:
 
     def test_signal_collects_distinct_entity_ids_in_order(self, signal: Signal) -> None:
         signal.entities = [
-            EntityMention(surface="Datadog", type=EntityType.COMPANY, start=0, end=7,
-                          resolved_id="ent_datadog", link_score=0.9),
-            EntityMention(surface="Grafana", type=EntityType.PRODUCT, start=8, end=15,
-                          resolved_id="ent_grafana", link_score=0.9),
-            EntityMention(surface="DD", type=EntityType.COMPANY, start=16, end=18,
-                          resolved_id="ent_datadog", link_score=0.7),
+            EntityMention(
+                surface="Datadog",
+                type=EntityType.COMPANY,
+                start=0,
+                end=7,
+                resolved_id="ent_datadog",
+                link_score=0.9,
+            ),
+            EntityMention(
+                surface="Grafana",
+                type=EntityType.PRODUCT,
+                start=8,
+                end=15,
+                resolved_id="ent_grafana",
+                link_score=0.9,
+            ),
+            EntityMention(
+                surface="DD",
+                type=EntityType.COMPANY,
+                start=16,
+                end=18,
+                resolved_id="ent_datadog",
+                link_score=0.7,
+            ),
             EntityMention(surface="unknown", type=EntityType.COMPANY, start=19, end=26),
         ]
         assert signal.resolved_entity_ids() == ["ent_datadog", "ent_grafana"]

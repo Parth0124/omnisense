@@ -12,7 +12,7 @@ from __future__ import annotations
 from datetime import datetime
 
 from sqlalchemy import DateTime, Index, String, func
-from sqlalchemy.orm import Mapped, mapped_column, declared_attr
+from sqlalchemy.orm import Mapped, declared_attr, mapped_column
 
 __all__ = ["SoftDeleteMixin", "TenantMixin", "TimestampMixin"]
 

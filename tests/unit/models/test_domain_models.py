@@ -72,9 +72,7 @@ class TestInvestigationTransitions:
         """Otherwise 'how long do investigations take' is unanswerable for
         exactly the runs that ended badly."""
         with pytest.raises(Exception, match="completed_at"):
-            Investigation(
-                id="i", tenant_id="t", query="q", status=InvestigationStatus.FAILED
-            )
+            Investigation(id="i", tenant_id="t", query="q", status=InvestigationStatus.FAILED)
 
     def test_completed_with_findings_is_a_success(self) -> None:
         """A `status == COMPLETED` check discards every honestly-degraded run,
@@ -106,8 +104,12 @@ class TestInvestigationStep:
     def test_completed_at_is_derived_from_duration(self) -> None:
         """The table stores a duration, not an end timestamp."""
         step = InvestigationStep(
-            id="s", investigation_id="i", sequence=0,
-            agent="planner", started_at=NOW, duration_ms=1500,
+            id="s",
+            investigation_id="i",
+            sequence=0,
+            agent="planner",
+            started_at=NOW,
+            duration_ms=1500,
         )
         assert step.completed_at == NOW + timedelta(milliseconds=1500)
 
@@ -168,13 +170,20 @@ class TestReport:
         section = ReportSection(kind=SectionKind.FINDINGS, heading="F")
         with pytest.raises(Exception, match="GAPS"):
             Report(
-                id="r", investigation_id="i", tenant_id="t", title="T",
-                sections=[section], gaps=["unestablished"],
+                id="r",
+                investigation_id="i",
+                tenant_id="t",
+                title="T",
+                sections=[section],
+                gaps=["unestablished"],
             )
 
     def test_a_report_with_a_gaps_section_is_valid(self) -> None:
         report = Report(
-            id="r", investigation_id="i", tenant_id="t", title="T",
+            id="r",
+            investigation_id="i",
+            tenant_id="t",
+            title="T",
             sections=[ReportSection(kind=SectionKind.GAPS, heading="Gaps")],
             gaps=["unestablished"],
         )
@@ -189,14 +198,13 @@ class TestReport:
             claims=[
                 ReportClaim(id="ok", text="t", citations=[_citation()]),
                 ReportClaim(
-                    id="bad", text="t",
+                    id="bad",
+                    text="t",
                     citations=[_citation(VerificationOutcome.NOT_FOUND)],
                 ),
             ],
         )
-        report = Report(
-            id="r", investigation_id="i", tenant_id="t", title="T", sections=[section]
-        )
+        report = Report(id="r", investigation_id="i", tenant_id="t", title="T", sections=[section])
         assert [c.id for c in report.unprintable_claims] == ["bad"]
         assert report.citation_count == 2
 
@@ -230,15 +238,21 @@ class TestConnector:
         for key in ("api_key", "access_token", "client_secret", "github_token"):
             with pytest.raises(Exception, match="credential"):
                 ConnectorAccount(
-                    id="a", tenant_id="t", connector_slug="rss",
-                    platform=Platform.RSS, category=SourceCategory.NEWS,
+                    id="a",
+                    tenant_id="t",
+                    connector_slug="rss",
+                    platform=Platform.RSS,
+                    category=SourceCategory.NEWS,
                     params={key: "value"},
                 )
 
     def test_ordinary_params_are_accepted(self) -> None:
         account = ConnectorAccount(
-            id="a", tenant_id="t", connector_slug="rss",
-            platform=Platform.RSS, category=SourceCategory.NEWS,
+            id="a",
+            tenant_id="t",
+            connector_slug="rss",
+            platform=Platform.RSS,
+            category=SourceCategory.NEWS,
             params={"feed_url": "https://example.com/feed", "subreddits": ["x"]},
         )
         assert account.params["feed_url"]

@@ -29,9 +29,11 @@ both sides emitted different DDL.
 from __future__ import annotations
 
 import importlib.util
+import itertools
+import pkgutil
+import sqlite3
 from collections.abc import Iterator
 from contextlib import contextmanager
-import sqlite3
 from pathlib import Path
 from types import ModuleType
 from typing import Any
@@ -41,38 +43,65 @@ from alembic.migration import MigrationContext
 from alembic.operations import Operations
 from sqlalchemy import Engine, create_engine, event, inspect
 
-from models.orm.base import SCHEMA, Base
-
 # Importing every mapping is what populates Base.metadata. Missing one here makes
 # this test assert parity against an incomplete schema and pass for the wrong
-# reason -- the same failure mode migrations/env.py warns about.
-from models.orm import (  # noqa: F401  (imported for the metadata side effect)
-    connector_account,
-    investigation,
-    report,
-    run,
-    signal,
-)
+# reason -- the same failure mode migrations/env.py warns about. Walked rather
+# than listed, so a mapping added tomorrow is compared without anyone
+# remembering to edit this import.
+import models.orm
+from models.orm.base import SCHEMA, Base
+
+for _module in pkgutil.iter_modules(models.orm.__path__):
+    importlib.import_module(f"{models.orm.__name__}.{_module.name}")
 
 pytestmark = pytest.mark.unit
 
-REVISION_PATH = (
-    Path(__file__).resolve().parents[3] / "migrations" / "versions" / "0001_initial_schema.py"
-)
+VERSIONS_DIR = Path(__file__).resolve().parents[3] / "migrations" / "versions"
 
 
-def load_revision() -> ModuleType:
-    """Import the revision by path.
+def load_revisions() -> list[ModuleType]:
+    """Every revision module, in the order alembic would apply them.
 
     Alembic names revision files after their id, so `0001_initial_schema` is not
     a legal Python identifier and cannot be imported with a normal `import`
     statement. Alembic itself loads them this way.
+
+    **All of them, not just the first.** This originally loaded `0001` by a
+    hardcoded path, which was correct while `0001` was the only migration and
+    silently wrong the moment a second one existed: the test then compared a
+    one-revision database against models describing three more tables, and the
+    only reason anyone noticed is that it failed loudly. Had the second migration
+    merely *altered* a table rather than adding one, it would have kept passing
+    while the thing it exists to catch went unchecked.
+
+    Ordered by following `down_revision` from the root, which is exactly how
+    alembic sequences them -- file names sort by timestamp and that is not the
+    same thing.
     """
-    spec = importlib.util.spec_from_file_location("_omnisense_revision_0001", REVISION_PATH)
-    assert spec is not None and spec.loader is not None
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
+    modules: dict[str, ModuleType] = {}
+    for path in sorted(VERSIONS_DIR.glob("*.py")):
+        if path.name.startswith("__"):
+            continue
+        spec = importlib.util.spec_from_file_location(f"_omnisense_rev_{path.stem}", path)
+        assert spec is not None and spec.loader is not None
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        modules[module.revision] = module
+
+    by_parent = {getattr(m, "down_revision", None): m for m in modules.values()}
+    ordered: list[ModuleType] = []
+    parent: str | None = None
+    while parent in by_parent:
+        current = by_parent[parent]
+        ordered.append(current)
+        parent = current.revision
+
+    assert len(ordered) == len(modules), (
+        "the revision chain is broken -- every migration must be reachable by "
+        f"following down_revision from the root. Loaded {len(modules)}, "
+        f"chained {len(ordered)}."
+    )
+    return ordered
 
 
 @contextmanager
@@ -161,26 +190,62 @@ def _catalogue(engine: Engine) -> dict[str, Any]:
 @pytest.fixture(scope="module")
 def from_migration() -> dict[str, Any]:
     """Catalogue of the database the revision builds."""
-    revision = load_revision()
-
     engine = _attach_schema_engine()
     with alembic_operations(engine):
-        revision.upgrade()
+        for revision in load_revisions():
+            revision.upgrade()
     return _catalogue(engine)
+
+
+@contextmanager
+def schema_qualified_metadata() -> Iterator[None]:
+    """Put the `omnisense` qualifier back on every table for the duration.
+
+    `models/orm/base.bind_for_testing()` strips `Table.schema` so the mappings
+    work on SQLite, and `tests/conftest.py` calls it from the `orm_engine`
+    fixture -- process-wide, permanently, for whichever test happens to need a
+    database first.
+
+    This module needs the opposite: it compares a *schema-qualified* migration
+    against schema-qualified models, using an ATTACHed SQLite database to make
+    `omnisense.signals` resolvable. If the strip has already run, `create_all`
+    writes into the main database instead, `_catalogue` reflects the attached one
+    and finds nothing, and the test reports that the migration creates thirteen
+    tables no mapping declares.
+
+    Which is exactly what happened: this passed only because it sorted before
+    every test that touched a database, and adding `test_artifact_orm.py` --
+    alphabetically earlier -- broke it. Restoring the qualifier here rather than
+    relying on collection order makes the fixture say what it means.
+    """
+    # Paired with the table object rather than keyed by `table.key`: the key is
+    # derived from the schema, so it changes the moment the schema is set and the
+    # restore lookup then misses every entry.
+    previous = [(table, table.schema) for table in Base.metadata.tables.values()]
+    previous_metadata_schema = Base.metadata.schema
+
+    Base.metadata.schema = SCHEMA
+    for table, _ in previous:
+        table.schema = SCHEMA
+    try:
+        yield
+    finally:
+        Base.metadata.schema = previous_metadata_schema
+        for table, schema in previous:
+            table.schema = schema
 
 
 @pytest.fixture(scope="module")
 def from_models() -> dict[str, Any]:
     """Catalogue of the database the ORM mappings build."""
     engine = _attach_schema_engine()
-    Base.metadata.create_all(engine)
+    with schema_qualified_metadata():
+        Base.metadata.create_all(engine)
     return _catalogue(engine)
 
 
 class TestMigrationMatchesModels:
-    def test_same_tables(
-        self, from_migration: dict[str, Any], from_models: dict[str, Any]
-    ) -> None:
+    def test_same_tables(self, from_migration: dict[str, Any], from_models: dict[str, Any]) -> None:
         only_migration = sorted(set(from_migration) - set(from_models))
         only_models = sorted(set(from_models) - set(from_migration))
         assert not only_migration, f"revision creates tables no mapping declares: {only_migration}"
@@ -202,7 +267,9 @@ class TestMigrationMatchesModels:
                 elif name not in mod:
                     differences.append(f"{table}.{name}: missing from the mappings")
                 elif mig[name] != mod[name]:
-                    differences.append(f"{table}.{name}: {mig[name]} (revision) != {mod[name]} (models)")
+                    differences.append(
+                        f"{table}.{name}: {mig[name]} (revision) != {mod[name]} (models)"
+                    )
         assert not differences, "column drift:\n  " + "\n  ".join(differences)
 
     def test_same_indexes(
@@ -245,22 +312,39 @@ class TestMigrationMatchesModels:
             )
 
 
-class TestRevisionIsWellFormed:
-    def test_is_the_base_revision(self) -> None:
-        revision = load_revision()
+class TestRevisionsAreWellFormed:
+    def test_the_history_starts_at_one_root(self) -> None:
+        revisions = load_revisions()
 
-        assert revision.revision == "0001"
-        assert revision.down_revision is None, "0001 must be the root of the history"
+        assert revisions[0].revision == "0001"
+        assert revisions[0].down_revision is None, "0001 must be the root of the history"
 
-    def test_downgrade_drops_everything_it_created(
-        self, from_models: dict[str, Any]
-    ) -> None:
-        """An irreversible first migration cannot be rolled back off a bad deploy."""
-        revision = load_revision()
+    def test_the_chain_is_unbroken(self) -> None:
+        """Each revision names the one before it.
+
+        A break does not fail loudly at deploy time -- alembic simply stops at
+        the last reachable revision, and every table after it is missing from a
+        database that reports itself as migrated.
+        """
+        revisions = load_revisions()
+        for previous, current in itertools.pairwise(revisions):
+            assert current.down_revision == previous.revision
+
+    def test_every_revision_reverses_itself(self) -> None:
+        """Applied in order, then rolled back in reverse, leaves nothing behind.
+
+        An irreversible migration cannot be rolled back off a bad deploy, and the
+        moment to discover that is here rather than at 3am. Checked across the
+        whole chain rather than only the first, because a later migration is the
+        more likely one to forget a `drop_index`.
+        """
+        revisions = load_revisions()
 
         engine = _attach_schema_engine()
         with alembic_operations(engine):
-            revision.upgrade()
+            for revision in revisions:
+                revision.upgrade()
             assert _catalogue(engine), "upgrade created nothing"
-            revision.downgrade()
+            for revision in reversed(revisions):
+                revision.downgrade()
         assert _catalogue(engine) == {}, "downgrade left tables behind"
