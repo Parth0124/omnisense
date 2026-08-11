@@ -21,10 +21,11 @@ from __future__ import annotations
 
 import importlib
 import pkgutil
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Iterator
 from typing import Any
 
 import pytest
+from pydantic_settings import BaseSettings
 from sqlalchemy import event
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
@@ -46,6 +47,49 @@ same connection for the life of the engine. That is required, not incidental:
 under a pool that opens a second connection, the second one gets its own empty
 `:memory:` database and every table `create_all` just made is invisible to it.
 """
+
+
+@pytest.fixture(autouse=True, scope="session")
+def _ignore_the_developers_env_file() -> Iterator[None]:
+    """Stop every settings group from reading the repo's real `.env`.
+
+    `backend/core/config.py` composes one `Settings` out of thirteen independent
+    `BaseSettings` groups, each built by its own `default_factory` and each
+    carrying `env_file` in its own `model_config`. So `Settings(_env_file=None)`
+    suppresses the file for the outer object and for nothing inside it -- every
+    group goes and reads `.env` regardless.
+
+    That made the suite pass or fail depending on whether the person running it
+    had a `.env`, and on what was in it: a test asserting the *declared default*
+    of `LLM_MODEL_PLANNER` saw whatever the developer had configured instead.
+    Nobody noticed because CI has no `.env` and neither did a fresh clone --
+    it only appears the moment someone runs `make env`, which is the first
+    instruction in the getting-started guide.
+
+    Session-scoped and autouse because the failure is environmental: any test
+    that reads settings is exposed, and remembering to opt in is exactly the
+    thing that will not happen.
+    """
+    import backend.core.config as config
+
+    patched: list[dict[str, object]] = []
+    for name in dir(config):
+        candidate = getattr(config, name)
+        if (
+            isinstance(candidate, type)
+            and issubclass(candidate, BaseSettings)
+            and candidate is not BaseSettings
+        ):
+            patched.append(candidate.model_config)
+            candidate.model_config["env_file"] = None
+
+    config.get_settings.cache_clear()
+    try:
+        yield
+    finally:
+        for model_config in patched:
+            model_config["env_file"] = config._ENV_FILE
+        config.get_settings.cache_clear()
 
 
 def _import_every_orm_module() -> None:

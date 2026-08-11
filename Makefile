@@ -50,6 +50,58 @@ env: ## Create .env from .env.example if missing
 up: ## Start local datastores (Postgres, Neo4j, Qdrant, Redis, OpenSearch, Redpanda)
 	$(COMPOSE) up -d
 
+.PHONY: wait
+wait: ## Block until every datastore reports healthy (or give up after 180s)
+	@echo "waiting for datastores to report healthy..."
+	@i=0; \
+	while [ $$i -lt 90 ]; do \
+	  status=$$($(COMPOSE) ps -a --format '{{.Service}} {{.State}} {{.Health}}' 2>/dev/null); \
+	  total=$$(printf '%s\n' "$$status" | grep -c . || true); \
+	  dead=$$(printf '%s\n' "$$status" \
+	    | awk '$$2 == "exited" || $$2 == "dead" { printf "%s ", $$1 }'); \
+	  pending=$$(printf '%s\n' "$$status" \
+	    | awk '$$2 == "running" && $$3 != "healthy" && $$3 != "" { printf "%s ", $$1 }'); \
+	  if [ -n "$$dead" ]; then \
+	    printf "\r%-72s\r" ""; \
+	    echo "Container exited instead of starting: $$dead"; \
+	    echo "  See why with:  $(COMPOSE) logs $$dead"; \
+	    exit 1; \
+	  fi; \
+	  if [ "$$total" -gt 0 ] && [ -z "$$pending" ]; then \
+	    printf "\r%-72s\r" ""; \
+	    echo "all $$total datastores healthy"; exit 0; \
+	  fi; \
+	  if [ "$$total" -eq 0 ]; then \
+	    printf "\r  no containers yet%-50s" ""; \
+	  else \
+	    printf "\r  still starting: %-54s" "$$pending"; \
+	  fi; \
+	  sleep 2; i=$$((i+1)); \
+	done; \
+	echo ""; \
+	echo "Gave up after 180s."; \
+	echo "  Still not healthy: $$pending"; \
+	echo "  OpenSearch is the usual culprit -- it wants ~60s and about 2GB of RAM."; \
+	echo "  Check Docker Desktop's memory limit, then run: make logs"; \
+	exit 1
+
+.PHONY: token
+token: ## Print a local dev JWT (the only way to authenticate locally)
+	@$(BIN)/python scripts/mint_token.py
+
+.PHONY: smoke
+smoke: ## Run one investigation end to end (needs 'make dev'; costs real tokens)
+	@$(BIN)/python scripts/smoke.py
+
+.PHONY: doctor
+doctor: ## Check every dependency and report what to fix
+	$(BIN)/python scripts/doctor.py
+
+.PHONY: start
+start: env up wait init-db doctor ## Everything: boot the stack, migrate, verify
+	@echo ""
+	@echo "Stack is up. Next: make api   (then http://localhost:8000/docs)"
+
 .PHONY: down
 down: ## Stop local datastores
 	$(COMPOSE) down

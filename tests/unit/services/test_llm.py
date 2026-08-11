@@ -40,7 +40,7 @@ No key, no network, no clock dependency.
 from __future__ import annotations
 
 import json
-from collections.abc import AsyncIterator, Sequence
+from collections.abc import AsyncIterator, Iterator, Sequence
 from contextlib import asynccontextmanager
 from typing import Any
 
@@ -61,6 +61,7 @@ from services.llm.embeddings import (
     FakeEmbeddingProvider,
     OpenAICompatibleEmbeddingProvider,
 )
+from services.llm.openai_compatible import _UNSUPPORTED_BOUNDS, _strict_schema
 from services.llm.provider import (
     BaseModelT,
     FakeLLMProvider,
@@ -1727,3 +1728,125 @@ class TestFakeEmbeddingProvider:
         await fake.embed(["a", "b"])
         await fake.embed(["c"])
         assert fake.batches == [["a", "b"], ["c"]]
+
+
+class TestStrictSchemaIsAcceptedByRealProviders:
+    """Every agent's output schema must survive both providers' validators.
+
+    This exists because it did not. `_strict_schema` handled the two things
+    OpenAI documents -- `additionalProperties: false` and every property required
+    -- and nothing else, and the result was rejected outright by *both* providers
+    for reasons neither shares:
+
+      OpenAI     `$ref cannot have keywords {'default'}`
+      Anthropic  `For 'number' type, properties maximum, minimum are not supported`
+
+    Five of the seven agents were affected, including the Report agent, so an
+    investigation ran the whole graph and stored nothing. Nothing failed loudly:
+    the provider downgraded to a looser mode and the run reported `completed`
+    with a null `report_id`.
+
+    Asserted against the schemas the agents actually declare, rather than against
+    a fixture, because the failure mode is a *new field* introduced with an
+    innocuous `Field(ge=0.0, le=1.0)` -- which is how every one of these arrived.
+    A fixture would keep passing while the real schema broke.
+
+    Offline: the provider rules are encoded as assertions rather than probed over
+    the network, so this runs in the unit suite. `TestStrictSchemaRejections`
+    below documents the exact upstream messages that motivated each rule.
+    """
+
+    @staticmethod
+    def _agent_output_models() -> list[type[BaseModel]]:
+        from agents.collector.schemas import CollectorOutput
+        from agents.critic.schemas import CriticOutput
+        from agents.insight.schemas import InsightOutput
+        from agents.planner.schemas import PlannerOutput
+        from agents.report.schemas import ReportOutput
+        from agents.retriever.schemas import RetrieverOutput
+        from agents.strategy.schemas import StrategyOutput
+
+        return [
+            PlannerOutput,
+            CollectorOutput,
+            RetrieverOutput,
+            InsightOutput,
+            StrategyOutput,
+            CriticOutput,
+            ReportOutput,
+        ]
+
+    @staticmethod
+    def _walk(node: Any) -> Iterator[dict[str, Any]]:
+        if isinstance(node, dict):
+            yield node
+            for value in node.values():
+                yield from TestStrictSchemaIsAcceptedByRealProviders._walk(value)
+        elif isinstance(node, list):
+            for item in node:
+                yield from TestStrictSchemaIsAcceptedByRealProviders._walk(item)
+
+    def test_no_ref_carries_a_sibling_keyword(self) -> None:
+        """OpenAI: `$ref cannot have keywords {'default'}`.
+
+        Pydantic emits `{"$ref": ..., "default": ...}` for any field whose type is
+        a model or enum and which declares a default -- so this appears without
+        anyone writing anything unusual.
+        """
+        for model in self._agent_output_models():
+            for node in self._walk(_strict_schema(model)):
+                if "$ref" in node:
+                    assert set(node) == {"$ref"}, (
+                        f"{model.__name__}: $ref carries {sorted(set(node) - {'$ref'})}; "
+                        "OpenAI rejects the whole request"
+                    )
+
+    def test_no_range_or_length_bound_survives(self) -> None:
+        """Anthropic: `For 'number' type, properties maximum, minimum are not supported`.
+
+        These come from `Field(ge=..., le=...)` and `Field(max_length=...)`, which
+        are the normal way to declare a bounded field.
+        """
+        for model in self._agent_output_models():
+            for node in self._walk(_strict_schema(model)):
+                offending = sorted(set(node) & _UNSUPPORTED_BOUNDS)
+                assert not offending, (
+                    f"{model.__name__}: schema still carries {offending}; "
+                    "Anthropic rejects the whole request"
+                )
+
+    def test_every_object_is_closed_and_fully_required(self) -> None:
+        """The original contract, kept: strict mode needs both."""
+        for model in self._agent_output_models():
+            for node in self._walk(_strict_schema(model)):
+                if node.get("type") == "object" and "properties" in node:
+                    assert node["additionalProperties"] is False
+                    assert node["required"] == sorted(node["properties"])
+
+    def test_a_dropped_bound_survives_in_the_description(self) -> None:
+        """Stripping the keyword must not lose the information.
+
+        The first version of the fix deleted bounds outright and broke the Report
+        agent: with `minItems: 1` gone from `sections`, the model had no reason to
+        know the list may not be empty, returned `[]`, and Pydantic rejected every
+        attempt -- so the run produced no report at all. The bound was never what
+        *enforced* the rule, but it was what *communicated* it.
+        """
+        from agents.report.schemas import ReportOutput
+
+        sections = _strict_schema(ReportOutput)["properties"]["sections"]
+        assert "minItems" not in sections
+        assert "minItems 1" in sections["description"]
+
+    def test_enums_and_descriptions_are_preserved(self) -> None:
+        """The stripping must not take the parts that steer the model.
+
+        `enum` is what makes a model answer `high` rather than `quite high`, and
+        both providers accept it. A sanitiser that removed everything unfamiliar
+        would pass the tests above and produce far worse output.
+        """
+        from agents.report.schemas import ReportOutput
+
+        nodes = list(self._walk(_strict_schema(ReportOutput)))
+        assert any("enum" in node for node in nodes), "enum constraints were stripped"
+        assert any("description" in node for node in nodes), "descriptions were stripped"

@@ -166,7 +166,9 @@ class OpenAICompatibleProvider:
         try:
             response = await self._http().post("/chat/completions", json=body)
         except httpx.TimeoutException as error:
-            raise LLMTimeout(f"{self._base_url} timed out after {self._settings.timeout_seconds}s") from error
+            raise LLMTimeout(
+                f"{self._base_url} timed out after {self._settings.timeout_seconds}s"
+            ) from error
         except httpx.HTTPError as error:
             raise LLMError(f"request to {self._base_url} failed: {error}") from error
 
@@ -354,9 +356,7 @@ class OpenAICompatibleProvider:
 
     # -------------------------------------------------------------- helpers --
 
-    def _apply_format(
-        self, body: dict[str, Any], mode: str, schema: type[BaseModelT]
-    ) -> None:
+    def _apply_format(self, body: dict[str, Any], mode: str, schema: type[BaseModelT]) -> None:
         if mode == StructuredMode.SCHEMA:
             body["response_format"] = {
                 "type": "json_schema",
@@ -369,9 +369,7 @@ class OpenAICompatibleProvider:
         elif mode == StructuredMode.OBJECT:
             body["response_format"] = {"type": "json_object"}
 
-    def _system_for(
-        self, mode: str, system: str | None, schema: type[BaseModelT]
-    ) -> str:
+    def _system_for(self, mode: str, system: str | None, schema: type[BaseModelT]) -> str:
         """Append the schema to the system prompt in the weaker modes.
 
         Not in `json_schema` mode: generation is already constrained there, and
@@ -427,6 +425,40 @@ def _extract_json(text: str) -> str:
     return match.group(0)
 
 
+_UNSUPPORTED_BOUNDS: Final[frozenset[str]] = frozenset(
+    {
+        "minimum",
+        "maximum",
+        "exclusiveMinimum",
+        "exclusiveMaximum",
+        "multipleOf",
+        "minItems",
+        "maxItems",
+        "uniqueItems",
+        "minLength",
+        "maxLength",
+    }
+)
+"""JSON Schema keywords stripped before a schema is sent to a provider.
+
+Every one is a *bound* rather than a *shape*, and no provider is obliged to
+support them. Anthropic refuses the whole request when it sees one -- the entire
+call fails, so the cost of leaving them in is total rather than partial.
+
+**Dropping them loses nothing that was ever enforced here.** These express
+"confidence is between 0 and 1", and the place that actually holds a model to
+that is `BaseModel.model_validate` when the response is parsed back -- which runs
+regardless of what the schema said, and is the only enforcement that was ever
+real. What is lost is a *hint* to the model, and a hint is worth precisely
+nothing when including it means the request is rejected outright.
+
+`enum`, `const`, `format` and `description` are deliberately **not** in this set:
+they describe what a value may *be* rather than how large it may get, they are
+what actually steer the model toward a valid answer, and both providers accept
+them.
+"""
+
+
 def _strict_schema(schema: type[BaseModelT]) -> dict[str, Any]:
     """A JSON Schema acceptable to strict structured-output implementations.
 
@@ -442,6 +474,43 @@ def _strict_schema(schema: type[BaseModelT]) -> dict[str, Any]:
     def tighten(node: Any) -> Any:
         if isinstance(node, dict):
             tightened = {key: tighten(value) for key, value in node.items()}
+
+            # A `$ref` may carry no siblings. Pydantic emits
+            # `{"$ref": "#/$defs/Foo", "default": "bar"}` for any field whose
+            # type is a model or enum and which has a default, and OpenAI
+            # refuses it outright: "$ref cannot have keywords {'default'}".
+            # Dropping the siblings is safe rather than lossy -- strict mode
+            # marks every property required below, so a default can never be
+            # consulted; and `description` on a `$ref` is documentation the
+            # target already carries.
+            if "$ref" in tightened and len(tightened) > 1:
+                tightened = {"$ref": tightened["$ref"]}
+
+            # Range and length bounds are not universally supported, and
+            # Anthropic rejects the entire request rather than ignoring them:
+            #   "For 'array' type, property 'maxItems' is not supported"
+            #   "For 'number' type, properties maximum, minimum are not supported"
+            # They arrive from ordinary `Field(ge=0.0, le=1.0)` and
+            # `Field(max_length=10)` declarations, so they appear on almost every
+            # agent schema without anyone opting into them.
+            #
+            # Moved into the description rather than simply deleted, because the
+            # first version of this deleted them and broke the Report agent: with
+            # `minItems: 1` gone, the model had no reason to know `sections` may
+            # not be empty, returned `[]`, and Pydantic then rejected every
+            # attempt. The bound was doing real work as a *hint* even though it
+            # was never the thing that enforced anything. Prose survives both
+            # providers' validators; the keyword does not.
+            dropped = {k: tightened.pop(k) for k in _UNSUPPORTED_BOUNDS if k in tightened}
+            if dropped:
+                spelled = ", ".join(f"{key} {value}" for key, value in sorted(dropped.items()))
+                existing = tightened.get("description")
+                tightened["description"] = (
+                    f"{existing} (constraints: {spelled})"
+                    if existing
+                    else f"Constraints: {spelled}."
+                )
+
             if tightened.get("type") == "object" and "properties" in tightened:
                 tightened["additionalProperties"] = False
                 # Strict mode requires every property listed. Optionality is

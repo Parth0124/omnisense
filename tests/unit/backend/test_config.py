@@ -33,11 +33,19 @@ ENV_EXAMPLE = REPO_ROOT / ".env.example"
 # importing `backend/core/config.py`, so credentials reach a connector as
 # constructor arguments supplied by `services/connector_service.py`.
 CREDENTIAL_PREFIXES = (
-    "REDDIT_", "RSS_", "NEWS_API", "GDELT_", "X_", "YOUTUBE_", "INSTAGRAM_",
-    "TIKTOK_", "LINKEDIN_", "AMAZON_", "PLAY_STORE_", "APP_STORE_", "TRUSTPILOT_",
-    "GOOGLE_PLACES_", "SEMANTIC_SCHOLAR_", "SLACK_", "JIRA_", "CONFLUENCE_",
-    "NOTION_", "GITHUB_", "SALESFORCE_", "HUBSPOT_",
+    "GITHUB_", "SLACK_", "JIRA_", "CONFLUENCE_", "NOTION_", "SEMANTIC_SCHOLAR_",
+    "HUGGINGFACE_", "GOOGLE_OAUTH_",
 )
+"""Per-connector secrets, which `.env.example` documents but `config.py` never reads.
+
+Connectors take their credentials at construction rather than from global
+settings, so these have no `Settings` field to match and would otherwise trip
+`test_every_documented_variable_is_used`.
+
+The list is exactly the eight shipped connectors plus the two step-13 ones. It is
+deliberately not a wildcard: when a connector is deleted, its prefix has to be
+removed here too, and that failing test is the reminder to delete its block from
+`.env.example` rather than leave a key nobody will ever fill in."""
 
 
 def _declared_in_env_example() -> list[str]:
@@ -73,6 +81,75 @@ def clean_env(monkeypatch: pytest.MonkeyPatch) -> None:
 def _settings(**env: object) -> Settings:
     """Build Settings from the environment only, ignoring any local `.env`."""
     return Settings(_env_file=None, **{})  # type: ignore[call-arg]
+
+
+class TestEnvExampleActuallyWorks:
+    """The template must produce a loadable configuration, not merely a documented one.
+
+    `TestEnvExampleIsInSync` compares two lists of *names*. It passes happily
+    while the file is unusable, and it did: `.env.example` shipped `LLM_EFFORT=`
+    with a blank value against a strict-enum field, so `cp .env.example .env`
+    followed by anything at all died at import with a validation error. Every
+    name was documented. The file could not be loaded.
+
+    So this reads the template the way `make env` does -- as the environment --
+    and constructs the real `Settings`. It is the only test here that would have
+    caught that, and the class of bug it guards is "the first command a new user
+    runs does not work".
+    """
+
+    @staticmethod
+    def _template_environment() -> dict[str, str]:
+        """`.env.example` parsed as `KEY=value`, blanks included.
+
+        Blanks are the point and must not be filtered out -- an unset optional is
+        exactly the case that broke.
+        """
+        pairs: dict[str, str] = {}
+        for line in ENV_EXAMPLE.read_text().splitlines():
+            match = re.match(r"^([A-Z][A-Z0-9_]*)=(.*)$", line)
+            if match:
+                pairs[match.group(1)] = match.group(2).split("#")[0].strip()
+        return pairs
+
+    def test_the_shipped_template_constructs_settings(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        for key, value in self._template_environment().items():
+            monkeypatch.setenv(key, value)
+        # `_env_file=None` so the developer's own .env cannot mask a broken
+        # template -- the machine that runs this most likely has a working one.
+        settings = Settings(_env_file=None)  # type: ignore[call-arg]
+        assert settings.llm.provider is not None
+        assert settings.postgres.url
+
+    def test_a_blank_optional_enum_reads_as_unset(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """`FOO=` means "not set". The regression that motivated the class above.
+
+        Asserted directly as well as through the template, because the template
+        could stop leaving these blank and quietly take the coverage with it.
+        """
+        for key, value in self._template_environment().items():
+            monkeypatch.setenv(key, value)
+        monkeypatch.setenv("LLM_EFFORT", "")
+        monkeypatch.setenv("EMBEDDING_PROVIDER", "")
+
+        settings = Settings(_env_file=None)  # type: ignore[call-arg]
+        assert settings.llm.effort is None
+        assert settings.embedding.provider is None
+
+    def test_a_genuinely_wrong_enum_value_is_still_rejected(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Blank is unset; a typo is an error. Coercing both would hide real mistakes."""
+        for key, value in self._template_environment().items():
+            monkeypatch.setenv(key, value)
+        monkeypatch.setenv("LLM_EFFORT", "aggressive")
+
+        with pytest.raises(Exception, match="LLM_EFFORT"):
+            Settings(_env_file=None)  # type: ignore[call-arg]
 
 
 class TestEnvExampleIsInSync:

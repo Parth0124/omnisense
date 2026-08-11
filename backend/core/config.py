@@ -26,15 +26,22 @@ from __future__ import annotations
 import enum
 import functools
 import re
-from typing import Self
+from typing import Annotated, Any, Self
 
-from pydantic import AliasChoices, Field, SecretStr, computed_field, model_validator
+from pydantic import (
+    AliasChoices,
+    BeforeValidator,
+    Field,
+    SecretStr,
+    computed_field,
+    model_validator,
+)
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 __all__ = [
     "AppSettings",
-    "Environment",
     "EmbeddingProvider",
+    "Environment",
     "KafkaSettings",
     "LLMEffort",
     "LLMProvider",
@@ -69,6 +76,27 @@ def _config(prefix: str) -> SettingsConfigDict:
 # --------------------------------------------------------------------------- #
 # Choice vocabularies
 # --------------------------------------------------------------------------- #
+
+
+def _blank_is_unset(value: Any) -> Any:
+    """Treat an empty environment variable as absent.
+
+    `FOO=` in a `.env` file is how everyone writes "I am not setting this", and
+    for a `str | None` field Pydantic already does the sensible thing. For an
+    *enum* field it does not: the empty string is not a member, so the whole
+    settings object fails to construct and the process dies at import with a
+    validation error naming a variable the operator deliberately left blank.
+
+    This is not hypothetical -- `.env.example` shipped `LLM_EFFORT=` for exactly
+    the reason above, which meant a `.env` copied straight from the template
+    could not be loaded at all. Anything that reads an optional enum from the
+    environment needs this in front of it.
+    """
+    return None if isinstance(value, str) and not value.strip() else value
+
+
+OptionalEnum = BeforeValidator(_blank_is_unset)
+"""Attach to any optional enum read from the environment. See `_blank_is_unset`."""
 
 
 class Environment(enum.StrEnum):
@@ -197,9 +225,7 @@ class AppSettings(BaseSettings):
     api_host: str = Field(default="0.0.0.0", alias="API_HOST")
     api_port: int = Field(default=8000, ge=1, le=65535, alias="API_PORT")
     api_workers: int = Field(default=1, ge=1, le=64, alias="API_WORKERS")
-    cors_allowed_origins: str = Field(
-        default="http://localhost:3000", alias="CORS_ALLOWED_ORIGINS"
-    )
+    cors_allowed_origins: str = Field(default="http://localhost:3000", alias="CORS_ALLOWED_ORIGINS")
 
     @computed_field
     @property
@@ -221,9 +247,7 @@ class SecuritySettings(BaseSettings):
 
     secret_key: SecretStr = Field(default=SecretStr(_PLACEHOLDER), alias="SECRET_KEY")
     jwt_algorithm: str = Field(default="HS256", alias="JWT_ALGORITHM")
-    access_token_ttl_seconds: int = Field(
-        default=3600, ge=60, alias="ACCESS_TOKEN_TTL_SECONDS"
-    )
+    access_token_ttl_seconds: int = Field(default=3600, ge=60, alias="ACCESS_TOKEN_TTL_SECONDS")
     credential_encryption_key: SecretStr = Field(
         default=SecretStr(_PLACEHOLDER), alias="CREDENTIAL_ENCRYPTION_KEY"
     )
@@ -420,7 +444,7 @@ class LLMSettings(BaseSettings):
     max_retries: int = Field(default=3, ge=0, alias="LLM_MAX_RETRIES")
     cache_enabled: bool = Field(default=True, alias="LLM_CACHE_ENABLED")
     temperature: float = Field(default=0.0, ge=0.0, le=2.0, alias="LLM_TEMPERATURE")
-    effort: LLMEffort | None = Field(
+    effort: Annotated[LLMEffort | None, OptionalEnum] = Field(
         default=None,
         alias="LLM_EFFORT",
         description="Reasoning depth. Unset means the provider's own default; see LLMEffort.",
@@ -432,7 +456,7 @@ class EmbeddingSettings(BaseSettings):
 
     model_config = _config("EMBEDDING_")
 
-    provider: EmbeddingProvider | None = None
+    provider: Annotated[EmbeddingProvider | None, OptionalEnum] = None
     model: str | None = None
     api_key: SecretStr | None = Field(
         default=None,

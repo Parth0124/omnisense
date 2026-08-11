@@ -28,6 +28,7 @@ from agents.report.agent import ReportAgent
 from agents.report.schemas import (
     ConfidenceBand,
     ReportClaim,
+    ReportInput,
     ReportOutput,
     ReportSection,
     SectionKind,
@@ -131,8 +132,9 @@ class TestCollector:
         meant to run off existing evidence."""
         state = _state(
             plan=[
-                PlanStep(id="a", description="fresh", agent=AgentName.COLLECTOR,
-                         requires_fresh_data=True),
+                PlanStep(
+                    id="a", description="fresh", agent=AgentName.COLLECTOR, requires_fresh_data=True
+                ),
                 PlanStep(id="b", description="stale", agent=AgentName.INSIGHT),
             ]
         )
@@ -172,9 +174,7 @@ class TestRetriever:
     def test_covered_sub_questions_are_marked_answered(self) -> None:
         from agents.retriever.schemas import RetrievedItem, RetrieverOutput
 
-        output = RetrieverOutput(
-            items=[RetrievedItem(signal_id="sig_1", sub_question_id="q1")]
-        )
+        output = RetrieverOutput(items=[RetrievedItem(signal_id="sig_1", sub_question_id="q1")])
         state = _state(
             sub_questions=[
                 SubQuestion(id="q1", question="a"),
@@ -198,27 +198,40 @@ class TestInsight:
         """On one source it is that source's framing restated as analysis."""
         with pytest.raises(Exception, match="causal"):
             Insight(
-                id="i1", kind=InsightKind.CAUSAL_HYPOTHESIS, statement="x because y",
-                reasoning="r", signal_ids=["sig_1"],
+                id="i1",
+                kind=InsightKind.CAUSAL_HYPOTHESIS,
+                statement="x because y",
+                reasoning="r",
+                signal_ids=["sig_1"],
             )
 
     def test_a_causal_claim_cannot_be_near_certain(self) -> None:
         with pytest.raises(Exception, match="confidence"):
             Insight(
-                id="i1", kind=InsightKind.CAUSAL_HYPOTHESIS, statement="s", reasoning="r",
-                signal_ids=["sig_1", "sig_2"], confidence=0.95,
+                id="i1",
+                kind=InsightKind.CAUSAL_HYPOTHESIS,
+                statement="s",
+                reasoning="r",
+                signal_ids=["sig_1", "sig_2"],
+                confidence=0.95,
             )
 
     def test_an_insight_cannot_exist_without_evidence(self) -> None:
         with pytest.raises(Exception):
-            Insight(id="i1", kind=InsightKind.OBSERVATION, statement="s", reasoning="r",
-                    signal_ids=[])
+            Insight(
+                id="i1", kind=InsightKind.OBSERVATION, statement="s", reasoning="r", signal_ids=[]
+            )
 
     def test_insights_append_as_the_increment(self) -> None:
         output = InsightOutput(
             insights=[
-                Insight(id="i1", kind=InsightKind.OBSERVATION, statement="s", reasoning="r",
-                        signal_ids=["sig_1"])
+                Insight(
+                    id="i1",
+                    kind=InsightKind.OBSERVATION,
+                    statement="s",
+                    reasoning="r",
+                    signal_ids=["sig_1"],
+                )
             ]
         )
         delta = _bare(InsightAgent).to_delta(output, _state())
@@ -271,16 +284,22 @@ class TestCritic:
         citation minor and the report ships with it."""
         with pytest.raises(Exception, match="blocking"):
             Finding(
-                kind=FindingKind.BROKEN_CITATION, severity=Severity.MINOR,
-                target="i1", detail="d",
+                kind=FindingKind.BROKEN_CITATION,
+                severity=Severity.MINOR,
+                target="i1",
+                detail="d",
             )
 
     def test_approval_over_a_blocking_finding_is_unrepresentable(self) -> None:
         with pytest.raises(Exception, match="approve"):
             CriticOutput(
                 findings=[
-                    Finding(kind=FindingKind.MISQUOTE, severity=Severity.BLOCKING,
-                            target="i1", detail="d")
+                    Finding(
+                        kind=FindingKind.MISQUOTE,
+                        severity=Severity.BLOCKING,
+                        target="i1",
+                        detail="d",
+                    )
                 ],
                 summary="looks fine",
                 approved=True,
@@ -367,7 +386,9 @@ class TestReport:
         """An unrendered gap is a gap the reader never learns about."""
         with pytest.raises(Exception, match="GAPS"):
             ReportOutput(
-                title="t", executive_summary="s", sections=[self._section()],
+                title="t",
+                executive_summary="s",
+                sections=[self._section()],
                 gaps=["something unestablished"],
             )
 
@@ -386,9 +407,7 @@ class TestReport:
                 degraded_backends=["vector"],
                 collection_failures=["reddit: 429"],
                 critique={
-                    "findings": [
-                        {"severity": "major", "kind": "unsupported_claim", "detail": "d"}
-                    ]
+                    "findings": [{"severity": "major", "kind": "unsupported_claim", "detail": "d"}]
                 },
             )
         )
@@ -404,7 +423,9 @@ class TestReport:
         agent = _bare(ReportAgent)
         gaps = agent._assemble_gaps(
             ReportInput(
-                query="q", tenant_id="t", investigation_id="i",
+                query="q",
+                tenant_id="t",
+                investigation_id="i",
                 unanswered_sub_questions=["a", "a"],
             )
         )
@@ -480,3 +501,58 @@ class TestPrompts:
             else:
                 assert "citation_rules" in fragments
                 assert "confidence_rubric" in fragments
+
+
+class TestReportWithNothingToReport:
+    """ "No evidence" must be expressible as a report, not as a failure.
+
+    `ReportOutput.sections` requires at least one section, which is correct. The
+    consequence was that a run with no evidence, no insights and no
+    recommendations could not produce a valid report at all: the model had
+    nothing to write a section about, returned `[]`, and validation rejected
+    every attempt. The investigation finished `completed` with a null report_id
+    and nothing anywhere said why.
+
+    That is the single most important report to render correctly -- it is the one
+    that tells you the system found nothing, as opposed to the system being
+    broken.
+    """
+
+    def test_a_run_with_no_evidence_still_produces_a_valid_report(self) -> None:
+        agent = _bare(ReportAgent)
+        request = ReportInput(
+            query="What changed recently?",
+            objective="find out",
+            tenant_id="t",
+            investigation_id="inv-1",
+            confidence=0.0,
+        )
+        report = agent._nothing_to_report(request, ["retrieval was unavailable"])
+
+        assert report.sections, "a report with no sections is not a valid report"
+        assert report.sections[0].kind is SectionKind.GAPS
+        assert report.confidence == 0.0
+        assert report.citation_count == 0
+        assert "retrieval was unavailable" in report.gaps
+
+    def test_it_says_why_rather_than_only_that(self) -> None:
+        """The reason is the entire value. "No findings" alone is indistinguishable
+        from a crash."""
+        agent = _bare(ReportAgent)
+        request = ReportInput(
+            query="q", objective="o", tenant_id="t", investigation_id="i", confidence=0.0
+        )
+        report = agent._nothing_to_report(request, ["the retrieval backend was down"])
+        assert "the retrieval backend was down" in report.sections[0].body
+
+    def test_it_makes_no_model_call(self) -> None:
+        """Deterministic by construction.
+
+        Asking a model to write "I found nothing" invites it to fill the space
+        with plausible prose about a corpus it never read -- and made the outcome
+        depend on whether it chose to that run.
+        """
+        import inspect
+
+        source = inspect.getsource(ReportAgent._nothing_to_report)
+        assert "call_model" not in source

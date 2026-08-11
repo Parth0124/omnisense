@@ -32,7 +32,7 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, Final
 
@@ -129,7 +129,7 @@ class ReportSummary:
         empty until the Report agent finishes. Fetching it before then is a
         `409 report_not_ready`, not a 404 -- the resource exists.
         """
-        return self.status is ReportStatus.COMPLETE
+        return self.status is ReportStatus.READY
 
 
 @dataclass(frozen=True, slots=True)
@@ -154,9 +154,7 @@ class ReportView(ReportSummary):
         usually narrative -- but "usually" is exactly why the caller should be
         able to see it rather than assume.
         """
-        return tuple(
-            section.heading for section in self.sections if not section.citations
-        )
+        return tuple(section.heading for section in self.sections if not section.citations)
 
 
 # --------------------------------------------------------------------------- #
@@ -197,9 +195,7 @@ class ReportService:
         resolved_id = report_id or f"rpt_{uuid.uuid4()}"
         async with self._session_factory() as session, session.begin():
             existing = (
-                await session.execute(
-                    select(ReportRow).where(ReportRow.id == resolved_id)
-                )
+                await session.execute(select(ReportRow).where(ReportRow.id == resolved_id))
             ).scalar_one_or_none()
             if existing is not None:
                 # Idempotent: an investigation retried under the same id must not
@@ -211,7 +207,7 @@ class ReportService:
                 tenant_id=self._tenant_id,
                 investigation_id=investigation_id,
                 title="",
-                status=ReportStatus.PENDING,
+                status=ReportStatus.DRAFT,
                 format=ReportFormat.MARKDOWN,
                 confidence=0.0,
                 version=1,
@@ -256,21 +252,29 @@ class ReportService:
 
         async with self._session_factory() as session, session.begin():
             previous = (
-                await session.execute(
-                    select(ReportRow)
-                    .where(
-                        ReportRow.investigation_id == investigation_id,
-                        ReportRow.tenant_id == self._tenant_id,
-                        ReportRow.superseded_by.is_(None),
+                (
+                    await session.execute(
+                        select(ReportRow)
+                        .where(
+                            ReportRow.investigation_id == investigation_id,
+                            ReportRow.tenant_id == self._tenant_id,
+                            ReportRow.superseded_by.is_(None),
+                        )
+                        .order_by(ReportRow.version.desc())
                     )
-                    .order_by(ReportRow.version.desc())
                 )
-            ).scalars().first()
+                .scalars()
+                .first()
+            )
 
             # A pending placeholder is filled in rather than superseded: it has
             # no content to preserve, and superseding it would leave a permanent
             # empty version 1 in every investigation's history.
-            reuse = previous if previous is not None and previous.status is ReportStatus.PENDING else None
+            reuse = (
+                previous
+                if previous is not None and previous.status is ReportStatus.PENDING
+                else None
+            )
             version = 1 if reuse is not None else (previous.version + 1 if previous else 1)
             resolved_id = report_id or (reuse.id if reuse else f"rpt_{uuid.uuid4()}")
 
@@ -286,7 +290,7 @@ class ReportService:
 
             row.title = str(document.get("title") or "Investigation report")[:1000]
             row.summary = _as_str_or_none(document.get("executive_summary"))
-            row.status = ReportStatus.COMPLETE
+            row.status = ReportStatus.READY
             row.format = ReportFormat.MARKDOWN
             row.confidence = float(document.get("confidence") or 0.0)
             row.object_key = object_key
@@ -324,9 +328,7 @@ class ReportService:
         """
         from sqlalchemy import delete
 
-        await session.execute(
-            delete(CitationRow).where(CitationRow.report_id == report_id)
-        )
+        await session.execute(delete(CitationRow).where(CitationRow.report_id == report_id))
         await session.execute(
             delete(ReportSectionRow).where(ReportSectionRow.report_id == report_id)
         )
@@ -384,17 +386,25 @@ class ReportService:
                 return None
 
             section_rows = (
-                await session.execute(
-                    select(ReportSectionRow)
-                    .where(ReportSectionRow.report_id == report_id)
-                    .order_by(ReportSectionRow.ordinal)
+                (
+                    await session.execute(
+                        select(ReportSectionRow)
+                        .where(ReportSectionRow.report_id == report_id)
+                        .order_by(ReportSectionRow.ordinal)
+                    )
                 )
-            ).scalars().all()
+                .scalars()
+                .all()
+            )
             citation_rows = (
-                await session.execute(
-                    select(CitationRow).where(CitationRow.report_id == report_id)
+                (
+                    await session.execute(
+                        select(CitationRow).where(CitationRow.report_id == report_id)
+                    )
                 )
-            ).scalars().all()
+                .scalars()
+                .all()
+            )
 
         by_section: dict[str | None, list[CitationView]] = {}
         for citation in citation_rows:
@@ -439,8 +449,7 @@ class ReportService:
             raise NotFoundError.for_resource("report", report_id)
         if not report.is_readable:
             raise ConflictError(
-                "the report is not ready yet; the investigation has not reached "
-                "its reporting step",
+                "the report is not ready yet; the investigation has not reached its reporting step",
                 details={"status": report.status.value, "code": "report_not_ready"},
             )
         return report
@@ -460,8 +469,10 @@ class ReportService:
 
         async with self._session_factory() as session:
             rows = (
-                await session.execute(statement.order_by(ReportRow.version.desc()))
-            ).scalars().all()
+                (await session.execute(statement.order_by(ReportRow.version.desc())))
+                .scalars()
+                .all()
+            )
         return [_summary(row) for row in rows]
 
     async def citing_signal(self, signal_id: str, *, limit: int = 100) -> list[str]:
@@ -477,16 +488,20 @@ class ReportService:
 
         async with self._session_factory() as session:
             rows = (
-                await session.execute(
-                    select(CitationRow.report_id)
-                    .where(
-                        CitationRow.signal_id == signal_id,
-                        CitationRow.tenant_id == self._tenant_id,
+                (
+                    await session.execute(
+                        select(CitationRow.report_id)
+                        .where(
+                            CitationRow.signal_id == signal_id,
+                            CitationRow.tenant_id == self._tenant_id,
+                        )
+                        .distinct()
+                        .limit(limit)
                     )
-                    .distinct()
-                    .limit(limit)
                 )
-            ).scalars().all()
+                .scalars()
+                .all()
+            )
         return list(rows)
 
 

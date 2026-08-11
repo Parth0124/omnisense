@@ -65,6 +65,7 @@ from agents.errors import (
     DEFAULT_RETRY_POLICY,
     RetryPolicy,
     StructuredOutputError,
+    ToolExecutionError,
     ToolNotAllowedError,
     classify,
     run_with_retry,
@@ -701,6 +702,26 @@ class BaseAgent[InputT: BaseModel, OutputT: BaseModel](abc.ABC):
                 agent=self.name,
             )
         if not self._registry.is_allowed(self.name, name):
+            # Two very different situations reach this line, and conflating them
+            # produced a wrong diagnosis for weeks: a tool the deployment could
+            # not build is not the same as a tool this agent was refused.
+            #
+            # `build_default_registry` *trims* the allowlist to whatever toolsets
+            # actually constructed, so an unavailable toolset silently removes
+            # its tools from every agent's grant. Reporting that as drift sends
+            # the reader to compare two files that agree perfectly, while the
+            # real cause -- a toolset that raised on construction -- is a warning
+            # further up the log.
+            if name not in self._registry.names:
+                raise ToolExecutionError(
+                    f"{name!r} is not registered in this deployment, so "
+                    f"{self.name} cannot call it. The toolset that provides it "
+                    "failed to construct -- look for `toolset.unavailable` "
+                    "earlier in the log for the reason.",
+                    agent=self.name,
+                    tool=name,
+                    transient=False,
+                )
             raise ToolNotAllowedError(
                 f"{name!r} is declared by {type(self).__name__} but not granted to "
                 f"{self.name} in agents/tools/registry.py -- the class and the registry "

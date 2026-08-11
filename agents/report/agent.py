@@ -59,6 +59,57 @@ class ReportAgent(BaseAgent[ReportInput, ReportOutput]):
     output_model: ClassVar[type[ReportOutput]] = ReportOutput
     tools: ClassVar[frozenset[str]] = frozenset({"fetch_passage", "resolve_citation"})
 
+    def _nothing_to_report(self, request: ReportInput, gaps: list[str]) -> ReportOutput:
+        """A valid report saying that nothing was found.
+
+        `ReportOutput.sections` requires at least one section, which is right --
+        a report with no sections is not a report. But it made "there is nothing
+        to report" *inexpressible*: with no evidence, no insights and no
+        recommendations, the model had nothing to write a section about, returned
+        an empty list, and validation rejected every attempt. The investigation
+        then finished `completed` with no report at all, which tells the reader
+        nothing about why.
+
+        Built here rather than asked of the model, for the same reason
+        `InsightAgent` short-circuits on the same condition: the honest content of
+        this report is already known, and asking a model to write it invites it to
+        fill the space with plausible prose about a corpus it never read. It also
+        makes the outcome deterministic, where the model version failed or
+        succeeded depending on whether it decided to invent a section that run.
+
+        Confidence is 0.0 and the only section is `GAPS`, so nothing downstream
+        can mistake this for a finding.
+        """
+        _log.warning(
+            "report.nothing_to_report",
+            unanswered=len(request.unanswered_sub_questions),
+            degraded=list(request.degraded_backends),
+        )
+        reasons = gaps or ["No evidence was retrieved for this investigation."]
+        body = (
+            "This investigation produced no evidence, so there is nothing to "
+            "report and no claim can be made.\n\nWhy:\n"
+            + "\n".join(f"- {reason}" for reason in reasons)
+        )
+        return ReportOutput(
+            title=f"No findings: {request.query[:120]}",
+            executive_summary=(
+                "The investigation ran to completion but retrieved no evidence, so "
+                "no findings are reported. The reasons are listed under Gaps."
+            ),
+            sections=[
+                ReportSection(
+                    kind=SectionKind.GAPS,
+                    title="Why there are no findings",
+                    body=body,
+                    order=1,
+                )
+            ],
+            confidence=0.0,
+            gaps=reasons,
+            citation_count=0,
+        )
+
     def build_input(self, state: InvestigationState) -> ReportInput:
         questions = state.get("sub_questions") or []
         evidence = state.get("evidence") or []
@@ -88,9 +139,10 @@ class ReportAgent(BaseAgent[ReportInput, ReportOutput]):
     async def execute(self, request: ReportInput, ctx: AgentContext) -> ReportOutput:
         gaps = self._assemble_gaps(request)
 
-        rendered = self.render_prompt(
-            ctx, query=request.query, objective=request.objective
-        )
+        if not request.evidence_ids and not request.insights and not request.recommendations:
+            return self._nothing_to_report(request, gaps)
+
+        rendered = self.render_prompt(ctx, query=request.query, objective=request.objective)
         drafted = await self.call_model(
             ctx,
             prompt=self._build_prompt(request, gaps),
@@ -103,9 +155,7 @@ class ReportAgent(BaseAgent[ReportInput, ReportOutput]):
         sections = [section for section in sections if section is not None]
 
         if gaps:
-            sections = [
-                section for section in sections if section.kind is not SectionKind.GAPS
-            ]
+            sections = [section for section in sections if section.kind is not SectionKind.GAPS]
             sections.append(self._gaps_section(gaps, order=len(sections)))
 
         if not sections:
@@ -204,9 +254,7 @@ class ReportAgent(BaseAgent[ReportInput, ReportOutput]):
             order=order,
         )
 
-    def _clean_section(
-        self, section: ReportSection, known: set[str]
-    ) -> ReportSection | None:
+    def _clean_section(self, section: ReportSection, known: set[str]) -> ReportSection | None:
         """Drop claims whose citations do not resolve.
 
         The last place a fabricated reference can be caught. A claim citing only
@@ -281,9 +329,7 @@ class ReportAgent(BaseAgent[ReportInput, ReportOutput]):
             lines.extend(f"- {gap}" for gap in gaps)
             lines.append("")
 
-        lines.append(
-            f"Signal ids you may cite: {', '.join(request.evidence_ids[:60])}"
-        )
+        lines.append(f"Signal ids you may cite: {', '.join(request.evidence_ids[:60])}")
         lines.append("")
         lines.append(
             "Write the report. Every claim must cite at least one signal id from "

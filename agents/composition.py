@@ -349,20 +349,38 @@ def _toolset_factories() -> dict[str, Any]:
     """
 
     def retrieval(settings: Settings) -> Any:
-        from agents.tools.retrieval_tools import build_retrieval_toolset
-
-        return build_retrieval_toolset()
+        # Not wired yet, and the blocker is upstream of this function.
+        # `RetrievalToolset` refuses to construct without at least one backing
+        # service, and the one that matters -- `HybridRetriever` -- needs an
+        # embedding provider to turn a query into a vector. `EMBEDDING_API_KEY`
+        # is blank, and OpenRouter (the default `LLM_PROVIDER`) has no
+        # embeddings endpoint at all, so there is nothing to point it at.
+        #
+        # Raised rather than returning None so the reason reaches the log. The
+        # previous version called a `build_retrieval_toolset` that has never
+        # existed, so the log said `ImportError` -- which reads as a broken
+        # import somebody should fix, rather than as a capability that is not
+        # built yet. See docs/tasks.md step 4 (embedding decision) and step 6.
+        raise NotImplementedError(
+            "retrieval tools need an embedding provider; EMBEDDING_API_KEY is unset "
+            "and OpenRouter serves no embeddings endpoint. Decide the embedding "
+            "backend at step 4 (docs/tasks.md), then construct HybridRetriever here"
+        )
 
     def graph(settings: Settings) -> Any:
         from agents.tools.graph_tools import GraphToolset, load_graph_service
 
         return GraphToolset(reader=load_graph_service(), tenant_id="default")
 
-
     def connectors(settings: Settings) -> Any:
-        from agents.tools.connector_tools import build_connector_toolset
+        # `load_connector_gateway()` raises NotImplementedError by design -- the
+        # gateway that would run a sync on an agent's behalf is not built. Called
+        # here anyway so the message it raises is the one that reaches the log,
+        # rather than the ImportError from the `build_connector_toolset` that the
+        # previous version invented and that never existed.
+        from agents.tools.connector_tools import ConnectorToolset, load_connector_gateway
 
-        return build_connector_toolset()
+        return ConnectorToolset(gateway=load_connector_gateway(), tenant_id="default")
 
     return {
         "retrieval": retrieval,

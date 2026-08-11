@@ -12,7 +12,9 @@ import httpx
 import pytest
 
 from backend.api.v1.health import REQUIRED_DEPENDENCIES
+from backend.core.config import get_settings
 from backend.core.exceptions import NotFoundError, RateLimitedError
+from backend.db import neo4j
 from backend.main import create_app
 
 pytestmark = pytest.mark.unit
@@ -65,9 +67,34 @@ class TestReadiness:
         assert response.status_code == 503
         assert response.json()["status"] == "unavailable"
 
-    async def test_readyz_never_raises(self, client: httpx.AsyncClient) -> None:
-        """Nothing is running, so every probe fails -- and it still answers."""
-        assert (await client.get("/readyz")).json()["checks"]["neo4j"]["status"] == "fail"
+    async def test_readyz_never_raises(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A dead dependency is reported, never raised.
+
+        Neo4j is pointed at TEST-NET-1 (RFC 5737, guaranteed unroutable) instead
+        of assuming the configured address has nothing behind it. That assumption
+        broke the moment anyone ran `make start`, which is the normal state while
+        developing -- and a unit test that passes only when your stack is *down*
+        is one people learn to ignore.
+        """
+        monkeypatch.setenv("NEO4J_URI", "bolt://192.0.2.1:7687")
+        get_settings.cache_clear()
+
+        # The driver is a process global while every async test gets its own
+        # event loop, so a driver built by an earlier test belongs to a loop that
+        # is already closed. Disposing it here raises "Event loop is closed" from
+        # inside the neo4j pool -- so it is set aside untouched and put back
+        # afterwards, and only the driver this test creates is disposed.
+        previous, neo4j._driver = neo4j._driver, None
+        try:
+            app = create_app()
+            transport = httpx.ASGITransport(app=app)
+            async with httpx.AsyncClient(transport=transport, base_url="http://test") as fresh:
+                body = (await fresh.get("/readyz")).json()
+            assert body["checks"]["neo4j"]["status"] == "fail"
+        finally:
+            await neo4j.dispose_driver()
+            neo4j._driver = previous
+            get_settings.cache_clear()
 
     async def test_probes_run_concurrently(self, client: httpx.AsyncClient) -> None:
         """The property that keeps `/readyz` inside the liveness deadline.

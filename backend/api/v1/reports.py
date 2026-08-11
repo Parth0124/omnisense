@@ -20,12 +20,11 @@ exact failure versioning exists to prevent.
 
 from __future__ import annotations
 
-from typing import Annotated
+from typing import Annotated, Final
 
 from fastapi import APIRouter, Depends, Query
 
 from backend.api.deps import Principal, require_scopes, upstream
-from backend.core.exceptions import NotFoundError
 from backend.schemas.common import problem_responses
 from backend.schemas.report import (
     CitationItem,
@@ -36,6 +35,7 @@ from backend.schemas.report import (
     ReportStatusName,
     ReportSummaryItem,
 )
+from models.orm.report import ReportStatus
 from services.report_service import ReportService, ReportSummary, ReportView
 
 __all__ = ["get_report_service", "router"]
@@ -60,6 +60,27 @@ async def get_report_service(principal: ReaderPrincipal) -> ReportService:
 ServiceDep = Annotated[ReportService, Depends(get_report_service)]
 
 
+_STATUS_NAMES: Final[dict[ReportStatus, ReportStatusName]] = {
+    ReportStatus.DRAFT: ReportStatusName.PENDING,
+    ReportStatus.READY: ReportStatusName.COMPLETE,
+    # A superseded report is finished and still fetchable by version; the client
+    # asked for this id and this id has a body. "Pending" would tell it to keep
+    # polling something that will never change again.
+    ReportStatus.SUPERSEDED: ReportStatusName.COMPLETE,
+    ReportStatus.FAILED: ReportStatusName.FAILED,
+}
+"""Storage vocabulary -> API vocabulary, stated rather than inferred.
+
+These two enums deliberately differ: storage distinguishes `draft` from
+`superseded`, and a client only needs to know whether there is a body to fetch.
+The previous code bridged them by testing whether the stored *value* happened to
+be spelled the same as an API name and defaulting to `pending` otherwise -- which
+silently mapped `ready` to `pending`, so a finished report told every client to
+keep polling forever. An explicit table cannot fail that way: a member added to
+either enum raises a KeyError here instead of quietly becoming `pending`.
+"""
+
+
 def _summary_fields(record: ReportSummary) -> dict[str, object]:
     confidence = float(record.confidence)
     return {
@@ -67,9 +88,7 @@ def _summary_fields(record: ReportSummary) -> dict[str, object]:
         "investigation_id": record.investigation_id,
         "title": record.title,
         "summary": record.summary,
-        "status": ReportStatusName(record.status.value)
-        if record.status.value in set(ReportStatusName)
-        else ReportStatusName.PENDING,
+        "status": _STATUS_NAMES.get(record.status, ReportStatusName.PENDING),
         "format": ReportFormatName(record.format.value)
         if record.format.value in set(ReportFormatName)
         else ReportFormatName.MARKDOWN,
@@ -97,11 +116,7 @@ def _detail(report: ReportView) -> ReportDetail:
 
     for section in report.sections:
         if section.heading.casefold().startswith("what this investigation could not"):
-            gaps = [
-                line.lstrip("- ").strip()
-                for line in section.body.splitlines()
-                if line.strip()
-            ]
+            gaps = [line.lstrip("- ").strip() for line in section.body.splitlines() if line.strip()]
             continue
         sections.append(
             ReportSectionItem(
@@ -130,9 +145,7 @@ def _detail(report: ReportView) -> ReportDetail:
         gaps=gaps,
         citation_count=report.citation_count,
         uncited_sections=list(report.uncited_sections),
-        download_url=(
-            f"/api/v1/reports/{report.id}/download" if report.object_key else None
-        ),
+        download_url=(f"/api/v1/reports/{report.id}/download" if report.object_key else None),
     )
 
 

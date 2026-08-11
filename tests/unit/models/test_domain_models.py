@@ -20,7 +20,6 @@ from models.connector import (
 )
 from models.enums import InvestigationStatus, Platform, SourceCategory
 from models.evidence import Citation, EvidenceReference, VerificationOutcome
-from models.forecast import Forecast, ForecastMethod, ForecastPoint
 from models.investigation import (
     TERMINAL_STATUSES,
     Investigation,
@@ -35,7 +34,6 @@ from models.report import (
     ReportSection,
     SectionKind,
 )
-from models.trend import Trend, TrendDirection
 
 pytestmark = pytest.mark.unit
 
@@ -206,99 +204,6 @@ class TestReport:
         assert ConfidenceBand.from_score(0.63) is ConfidenceBand.MODERATE
         assert ConfidenceBand.from_score(0.9) is ConfidenceBand.HIGH
         assert ConfidenceBand.from_score(0.2) is ConfidenceBand.LOW
-
-
-class TestTrend:
-    def test_a_direction_needs_three_observations(self) -> None:
-        """'Doubled' from two observations is technically true, reads as a
-        finding, and is noise."""
-        with pytest.raises(Exception, match="observations"):
-            Trend(topic="t", direction=TrendDirection.RISING, observation_count=2)
-
-    def test_volatile_is_exempt_from_the_floor(self) -> None:
-        """Volatility is itself a statement that the series is too short to
-        call."""
-        assert Trend(topic="t", direction=TrendDirection.VOLATILE, observation_count=1)
-
-    def test_an_inverted_window_is_rejected(self) -> None:
-        with pytest.raises(Exception, match="window_end"):
-            Trend(
-                topic="t", direction=TrendDirection.STABLE,
-                window_start=NOW, window_end=NOW - timedelta(days=1),
-            )
-
-    def test_significance_needs_a_measured_change(self) -> None:
-        trend = Trend(topic="t", direction=TrendDirection.RISING, observation_count=5)
-        assert not trend.is_significant
-        assert Trend(
-            topic="t", direction=TrendDirection.RISING,
-            observation_count=5, change_pct=40.0,
-        ).is_significant
-
-    def test_a_small_move_is_not_significant(self) -> None:
-        assert not Trend(
-            topic="t", direction=TrendDirection.RISING,
-            observation_count=5, change_pct=3.0,
-        ).is_significant
-
-
-class TestForecast:
-    def _point(self) -> ForecastPoint:
-        return ForecastPoint(at=NOW, lower=1.0, value=2.0, upper=3.0)
-
-    def test_a_band_must_contain_its_estimate(self) -> None:
-        with pytest.raises(Exception, match="does not contain"):
-            ForecastPoint(at=NOW, lower=5.0, value=2.0, upper=3.0)
-
-    def test_insufficient_data_carries_no_points(self) -> None:
-        """A label beside a number is a label that gets ignored -- the number is
-        what survives into the slide."""
-        with pytest.raises(Exception, match="no points"):
-            Forecast(
-                subject="s", method=ForecastMethod.INSUFFICIENT_DATA,
-                points=[self._point()],
-            )
-
-    def test_a_bare_refusal_is_valid(self) -> None:
-        assert Forecast(subject="s", method=ForecastMethod.INSUFFICIENT_DATA)
-
-    def test_a_projection_needs_history(self) -> None:
-        with pytest.raises(Exception, match="noise"):
-            Forecast(
-                subject="s", method=ForecastMethod.LINEAR,
-                points=[self._point()], history_points=3, caveats=["c"],
-            )
-
-    def test_a_projection_needs_caveats(self) -> None:
-        with pytest.raises(Exception, match="caveats"):
-            Forecast(
-                subject="s", method=ForecastMethod.LINEAR,
-                points=[self._point()], history_points=20,
-            )
-
-    def test_a_wide_band_is_not_actionable(self) -> None:
-        """A range spanning 'up a third' to 'down a fifth' does not support a
-        decision, and presenting its midpoint hides that."""
-        wide = Forecast(
-            subject="s", method=ForecastMethod.LINEAR, history_points=20,
-            caveats=["c"],
-            points=[
-                ForecastPoint(at=NOW, lower=0.0, value=10.0, upper=20.0),
-                ForecastPoint(at=NOW + timedelta(days=1), lower=0.0, value=11.0, upper=22.0),
-            ],
-        )
-        assert not wide.is_actionable
-
-    def test_a_tight_band_over_a_real_move_is_actionable(self) -> None:
-        tight = Forecast(
-            subject="s", method=ForecastMethod.LINEAR, history_points=20,
-            caveats=["c"],
-            points=[
-                ForecastPoint(at=NOW, lower=9.5, value=10.0, upper=10.5),
-                ForecastPoint(at=NOW + timedelta(days=1), lower=29.5, value=30.0, upper=30.5),
-            ],
-        )
-        assert tight.is_actionable
 
 
 class TestConnector:

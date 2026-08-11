@@ -24,6 +24,7 @@ from pathlib import Path
 
 import pytest
 
+from backend.core.config import get_settings
 from backend.db import opensearch
 
 pytestmark = pytest.mark.unit
@@ -93,12 +94,28 @@ class TestSignalIndexMapping:
 
 
 class TestUnreachableCluster:
-    async def test_check_returns_false_and_does_not_raise(self) -> None:
-        """Nothing listens on OPENSEARCH_URL in the unit suite."""
+    async def test_check_returns_false_and_does_not_raise(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """An unreachable cluster reports False rather than raising.
+
+        Pointed at TEST-NET-1 (RFC 5737, reserved for documentation and
+        guaranteed unroutable) rather than relying on the configured URL having
+        nothing behind it. That assumption held only while nobody had the stack
+        running -- and `make start` is the normal state for anyone developing
+        here, so this test failed for exactly the people most likely to run it.
+        `docs/testing-strategy.md` requires the unit suite to need no external
+        services; depending on a port being *free* is the same dependency wearing
+        a disguise.
+        """
+        monkeypatch.setenv("OPENSEARCH_URL", "http://192.0.2.1:9200")
+        get_settings.cache_clear()
+        await opensearch.dispose_opensearch()
         try:
             assert await opensearch.check_opensearch() is False
         finally:
             await opensearch.dispose_opensearch()
+            get_settings.cache_clear()
 
     async def test_dispose_is_safe_before_any_client_exists(self) -> None:
         await opensearch.dispose_opensearch()

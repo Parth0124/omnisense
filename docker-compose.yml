@@ -66,7 +66,13 @@ services:
     volumes:
       - neo4j_data:/data
       - neo4j_logs:/logs
-      - ./docker/local/neo4j:/var/lib/neo4j/import:ro
+      # `./docker/local/neo4j` is deliberately NOT mounted. Neo4j's entrypoint
+      # chowns /var/lib/neo4j/import at startup, which fails on a `:ro` bind and
+      # takes the container down with exit code 1 -- so with the mount present
+      # Neo4j never started at all. Nothing needed it: the one file in there
+      # (01-constraints.cypher) is read from the host by
+      # `scripts/init_databases.py` and applied over Bolt, never from inside the
+      # container. See `make init-db`.
     healthcheck:
       test: ["CMD-SHELL", "wget -qO- http://localhost:7474 || exit 1"]
       interval: 15s
