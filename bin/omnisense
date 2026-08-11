@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+# The `omnisense` command.
+#
+# A wrapper rather than an installed entry point: pyproject.toml has no
+# [project] table on purpose, so there is nothing for pip to install a script
+# from. This resolves the repository from its own location, which means it works
+# from any directory and through a symlink.
+set -euo pipefail
+here="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}" 2>/dev/null || echo "${BASH_SOURCE[0]}")")" && pwd)"
+root="$(dirname "$here")"
+exec "$root/.venv/bin/python" -m cli "$@"

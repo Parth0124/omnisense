@@ -338,11 +338,48 @@ class TestPausingRatherThanDeleting:
         resumed = await service.set_active(slug="omnisense", is_active=True)
         assert resumed.is_active
 
-    def test_there_is_no_delete(self) -> None:
-        """Asserted rather than assumed. Adding one later should be a decision
-        somebody makes on purpose, not a convenience that arrives in a refactor
-        and quietly takes a project's history with it."""
-        assert not hasattr(ProjectService, "delete")
+    async def test_a_project_holding_artifacts_refuses_to_be_deleted(
+        self, service: ProjectService, factory: async_sessionmaker[AsyncSession]
+    ) -> None:
+        """And names what to do instead. Deleting would either orphan the sources
+        or cascade into their history, and every citation the system produces
+        resolves against those rows."""
+        await service.create(name="OmniSense", slug="omnisense")
+        source = await add_source(factory, "R_1", "omnisense/api", artifacts=3)
+        await service.attach_source(slug="omnisense", source_id=source)
+
+        with pytest.raises(ConflictError, match="pause"):
+            await service.delete(slug="omnisense")
+
+        assert await service.get("omnisense")
+
+    async def test_an_empty_project_can_be_deleted(
+        self, service: ProjectService, factory: async_sessionmaker[AsyncSession]
+    ) -> None:
+        """Because there is nothing to protect. Refusing would leave somebody
+        editing SQL to undo a typo made thirty seconds ago."""
+        await service.create(name="Typo", slug="typoo")
+        await service.delete(slug="typoo")
+
+        with pytest.raises(NotFoundError):
+            await service.get("typoo")
+
+    async def test_deleting_detaches_its_sources_rather_than_destroying_them(
+        self, service: ProjectService, factory: async_sessionmaker[AsyncSession]
+    ) -> None:
+        """A repository is not owned by the project that grouped it. With no
+        artifacts yet, the source itself is still worth keeping -- it may be
+        re-attached elsewhere in a moment."""
+        await service.create(name="Wrong", slug="wrong")
+        source = await add_source(factory, "R_1", "omnisense/api")
+        await service.attach_source(slug="wrong", source_id=source)
+
+        await service.delete(slug="wrong")
+
+        async with factory() as session:
+            stored = await session.get(SourceRow, source)
+        assert stored is not None
+        assert stored.project_id is None
 
 
 class TestSlugNormalisation:

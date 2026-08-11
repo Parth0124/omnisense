@@ -40,7 +40,7 @@ ignore = [
 
 [tool.ruff.lint.isort]
 known-first-party = [
-    "agents", "backend", "connectors", "graph",
+    "agents", "backend", "cli", "connectors", "graph",
     "models", "prompts", "retrieval", "services", "workers",
 ]
 

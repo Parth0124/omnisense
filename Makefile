@@ -89,6 +89,10 @@ wait: ## Block until every datastore reports healthy (or give up after 180s)
 token: ## Print a local dev JWT (the only way to authenticate locally)
 	@$(BIN)/python scripts/mint_token.py
 
+.PHONY: cli
+cli: ## Run the omnisense CLI:  make cli ARGS="project list"
+	@./bin/omnisense $(ARGS)
+
 .PHONY: smoke
 smoke: ## Run one investigation end to end (needs 'make dev'; costs real tokens)
 	@$(BIN)/python scripts/smoke.py

@@ -188,6 +188,60 @@ class ProjectService:
             await session.refresh(row)  # see `attach_source` for why
             return _as_project(row)
 
+    async def delete(self, *, slug: str) -> None:
+        """Delete a project -- but only one that has no history to lose.
+
+        The original version of this service had no `delete` at all, on the
+        grounds that removing a project either orphans its sources or cascades
+        into their artifacts, and "we stopped working on this" is a different
+        fact from "this never happened".
+
+        That reasoning is sound for a project with history and pedantry for one
+        that was mistyped thirty seconds ago. So the guard is the artifact count
+        rather than the existence of the project: with nothing ingested there is
+        nothing to protect, and refusing would leave somebody editing SQL to undo
+        a typo.
+
+        A project that *does* hold artifacts is refused, with `deactivate` named
+        as the thing they almost certainly want -- it stops the syncing and keeps
+        everything.
+        """
+        async with self._session_factory() as session:
+            project = await self._require_project(session, slug)
+
+            artifacts = (
+                await session.execute(
+                    select(func.count())
+                    .select_from(ArtifactRow)
+                    .join(SourceRow, SourceRow.id == ArtifactRow.source_id)
+                    .where(SourceRow.project_id == project.id)
+                )
+            ).scalar_one()
+
+            if artifacts:
+                raise ConflictError(
+                    f"{slug!r} holds {artifacts:,} artifacts and will not be deleted. "
+                    f"Pause it instead -- it stops syncing and keeps its history: "
+                    f"omnisense project pause {slug}",
+                    details={"slug": slug, "artifact_count": artifacts},
+                )
+
+            # Sources are detached rather than deleted. A repository is not owned
+            # by the project that grouped it -- the same one may be re-attached
+            # elsewhere, and deleting it here would destroy a row the artifacts
+            # foreign key protects anyway.
+            for source in (
+                (await session.execute(select(SourceRow).where(SourceRow.project_id == project.id)))
+                .scalars()
+                .all()
+            ):
+                source.project_id = None
+
+            await session.delete(project)
+            await session.commit()
+
+        _log.info("project.deleted", slug=slug)
+
     # ------------------------------------------------------------- reading --
 
     async def get(self, slug: str) -> Project:
