@@ -82,6 +82,7 @@ from models.orm.connector_account import (
 )
 from models.orm.investigation import InvestigationRow, InvestigationStepRow, StepStatus
 from models.orm.mixins import DEFAULT_TENANT
+from models.orm.project import ProjectRow
 from models.orm.report import (
     CitationRow,
     ReportFormat,
@@ -307,9 +308,23 @@ async def seed_trace(session: AsyncSession) -> TraceRow:
     return await _add(session, make_trace())
 
 
+def make_project() -> ProjectRow:
+    return ProjectRow(
+        id="prj_1",
+        slug="omnisense",
+        name="OmniSense",
+        description="the developer platform",
+    )
+
+
+async def seed_project(session: AsyncSession) -> ProjectRow:
+    return await _add(session, make_project())
+
+
 def make_source() -> SourceRow:
     return SourceRow(
         id="src_1",
+        project_id="prj_1",
         platform=Platform.GITHUB,
         external_id="R_kgDOABCD1M",
         name="omnisense/api",
@@ -342,6 +357,7 @@ def make_artifact() -> ArtifactRow:
 
 
 async def seed_source(session: AsyncSession) -> SourceRow:
+    await seed_project(session)
     return await _add(session, make_source())
 
 
@@ -356,6 +372,7 @@ async def seed_artifact(session: AsyncSession) -> ArtifactRow:
 
 
 SEEDERS: dict[str, Callable[[AsyncSession], Awaitable[Any]]] = {
+    "projects": seed_project,
     "sources": seed_source,
     "people": seed_person,
     "artifacts": seed_artifact,
@@ -372,6 +389,7 @@ SEEDERS: dict[str, Callable[[AsyncSession], Awaitable[Any]]] = {
 }
 
 MODELS: dict[str, type[Any]] = {
+    "projects": ProjectRow,
     "sources": SourceRow,
     "people": PersonRow,
     "artifacts": ArtifactRow,
@@ -1096,6 +1114,7 @@ class TestUniqueConstraints:
             "uq_artifacts_platform_native_id",
             "uq_sources_platform_external_id",
             "uq_people_platform_external_id",
+            "uq_projects_tenant_id_slug",
             "uq_connector_cursors_connector_slug_account_id_params_hash",
             "uq_investigation_steps_investigation_id_sequence",
             "uq_reports_investigation_id_version",
@@ -1137,6 +1156,9 @@ EXPECTED_ON_DELETE: dict[str, str] = {
     # machine. A deleted account must not take the commits it authored with it,
     # so the reference is cleared and the work survives.
     "fk_artifacts_actor_id_people": "SET NULL",
+    # Removing a project must not delete the repositories it grouped, still less
+    # their history. It un-groups them.
+    "fk_sources_project_id_projects": "SET NULL",
 }
 
 

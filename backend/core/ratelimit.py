@@ -34,7 +34,6 @@ from __future__ import annotations
 
 import math
 import time
-from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any, Final, Protocol
 
@@ -44,10 +43,10 @@ __all__ = [
     "DEFAULT_BURST",
     "DEFAULT_RATE_PER_MINUTE",
     "KEY_PREFIX",
+    "BucketStore",
     "Decision",
     "InMemoryBucketStore",
     "RateLimiter",
-    "BucketStore",
 ]
 
 logger = get_logger(__name__)

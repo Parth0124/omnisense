@@ -30,7 +30,7 @@ from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, status
 
-from backend.api.deps import Principal, require_scopes, upstream
+from backend.api.deps import Principal, require_scopes
 from backend.core.exceptions import NotFoundError, ValidationError
 from backend.core.logging import get_logger
 from backend.schemas.common import problem_responses

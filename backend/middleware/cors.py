@@ -29,7 +29,7 @@ short enough that a policy change propagates within a deploy cycle.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Final
 
 from backend.core.exceptions import ConfigurationError

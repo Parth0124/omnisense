@@ -38,8 +38,8 @@ __all__ = [
     "ReportDetail",
     "ReportFormatName",
     "ReportSectionItem",
-    "ReportSummaryItem",
     "ReportStatusName",
+    "ReportSummaryItem",
 ]
 
 MAX_BODY_CHARS: Final = 50_000

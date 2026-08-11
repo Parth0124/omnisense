@@ -39,8 +39,8 @@ __all__ = [
     "ConnectorHealth",
     "ConnectorItem",
     "ConnectorStatusName",
-    "SyncRequest",
     "SyncAccepted",
+    "SyncRequest",
 ]
 
 MAX_PARAM_KEYS: Final = 20

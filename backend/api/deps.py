@@ -262,6 +262,8 @@ SCOPES: Final[frozenset[str]] = frozenset(
         "graph:read",
         "connectors:write",
         "agents:run",
+        "projects:read",
+        "projects:write",
     }
 )
 """The scope vocabulary of `docs/api-reference.md` §3.1.
@@ -274,7 +276,16 @@ day it is added the typo silently becomes a grant.
 
 ROLE_SCOPES: Final[Mapping[str, frozenset[str]]] = {
     "viewer": frozenset(
-        {"investigations:read", "reports:read", "signals:read", "graph:read"}
+        {
+            "investigations:read",
+            "reports:read",
+            "signals:read",
+            "graph:read",
+            # A viewer may see which projects exist -- that is the frame every
+            # other read is scoped by, and hiding it would leave a viewer able to
+            # read artifacts without being able to say what they belong to.
+            "projects:read",
+        }
     ),
     "analyst": frozenset(
         {
@@ -284,11 +295,22 @@ ROLE_SCOPES: Final[Mapping[str, frozenset[str]]] = {
             "signals:read",
             "graph:read",
             "connectors:write",
+            "projects:read",
+            # An analyst onboards repositories; that is the ordinary use of the
+            # product rather than an administrative act.
+            "projects:write",
         }
     ),
     "service": frozenset(
-        {"investigations:read", "investigations:write", "reports:read", "signals:read",
-         "graph:read", "connectors:write"}
+        {
+            "investigations:read",
+            "investigations:write",
+            "reports:read",
+            "signals:read",
+            "graph:read",
+            "connectors:write",
+            "projects:read",
+        }
     ),
     "admin": SCOPES,
 }
@@ -333,8 +355,6 @@ class Principal:
     def missing(self, required: Iterable[str]) -> list[str]:
         """Which of `required` this principal lacks, sorted for a stable message."""
         return sorted(scope for scope in required if scope not in self.scopes)
-
-
 
 
 def _decode_jwt(token: str, settings: Settings) -> dict[str, Any]:
@@ -766,9 +786,7 @@ class IdempotencyStore:
             status_code=int(existing.get("status", 200)),
         )
 
-    async def finish(
-        self, outcome: IdempotencyOutcome, *, status_code: int, body: Any
-    ) -> None:
+    async def finish(self, outcome: IdempotencyOutcome, *, status_code: int, body: Any) -> None:
         """Record the response so a replay can return it for the next 24 hours.
 
         Called only after the work is durable. Recording before the commit would
@@ -919,8 +937,7 @@ def csv_enum(
     unknown = sorted({part for part in requested if part not in allowed})
     if unknown:
         raise ValidationError(
-            f"unknown {parameter} value(s) {unknown}; permitted values are "
-            f"{sorted(allowed)}",
+            f"unknown {parameter} value(s) {unknown}; permitted values are {sorted(allowed)}",
             details={"parameter": parameter, "unknown": unknown, "allowed": sorted(allowed)},
         )
     return frozenset(requested)

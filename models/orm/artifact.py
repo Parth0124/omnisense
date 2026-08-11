@@ -55,6 +55,17 @@ class SourceRow(TenantMixin, TimestampMixin, Base):
 
     id: Mapped[str] = mapped_column(String(64), primary_key=True)
 
+    # Nullable, and that is a real state rather than a gap: a source is
+    # discovered by a connector and assigned to a project by a person, and those
+    # do not happen in the same instant. An unassigned source still collects
+    # artifacts; they simply do not answer any project-scoped question yet.
+    #
+    # `SET NULL` on delete, not `CASCADE`: removing a project must not delete the
+    # repositories it grouped, still less their history. It un-groups them.
+    project_id: Mapped[str | None] = mapped_column(
+        String(64), ForeignKey("projects.id", ondelete="SET NULL"), nullable=True
+    )
+
     platform: Mapped[Platform] = mapped_column(
         TolerantEnumType(Platform), nullable=False, index=True
     )
@@ -75,6 +86,9 @@ class SourceRow(TenantMixin, TimestampMixin, Base):
         # artifact pointing here follows for free.
         UniqueConstraint("platform", "external_id", name="uq_sources_platform_external_id"),
         tenant_scoped_index("sources", "platform", "name"),
+        # "Every source in this project" -- walked on every project-scoped read,
+        # which is most of them.
+        tenant_scoped_index("sources", "project_id"),
     )
 
 

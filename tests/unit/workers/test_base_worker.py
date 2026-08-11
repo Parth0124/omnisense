@@ -38,6 +38,7 @@ from aiokafka.structs import TopicPartition
 from backend.core.config import Settings
 from services.events.consumer import ConsumedMessage, EventConsumer
 from services.events.schemas import RawRecordEvent, SignalEnrichedEvent
+from tests.unit.workers.conftest import FakeBroker, FakeConsumer, envelope_bytes
 from workers.runtime.base_worker import ConsumerWorker, PeriodicWorker
 from workers.runtime.health import (
     LIVENESS_STALE_AFTER_SECONDS,
@@ -45,8 +46,6 @@ from workers.runtime.health import (
     HealthState,
     WorkerMetrics,
 )
-
-from tests.unit.workers.conftest import FakeBroker, FakeConsumer, envelope_bytes
 
 pytestmark = pytest.mark.unit
 

@@ -21,6 +21,7 @@ from backend.api.v1 import (
     graph,
     health,
     investigations,
+    projects,
     reports,
     signals,
     stream,
@@ -54,6 +55,7 @@ v1.include_router(signals.router)
 v1.include_router(reports.router)
 v1.include_router(graph.router)
 v1.include_router(connectors.router)
+v1.include_router(projects.router)
 v1.include_router(agents.router)
 
 api_router.include_router(v1)

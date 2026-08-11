@@ -78,10 +78,10 @@ __all__ = [
     "ALLOWED_STEP_TRANSITIONS",
     "ALLOWED_TRANSITIONS",
     "MAX_QUERY_LENGTH",
+    "TERMINAL_STEP_STATUSES",
     "InvestigationRecord",
     "InvestigationService",
     "StepRecord",
-    "TERMINAL_STEP_STATUSES",
 ]
 
 logger = get_logger(__name__)

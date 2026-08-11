@@ -29,10 +29,8 @@ from connectors.exceptions import NormalizationError
 from connectors.protocol import (
     Credentials,
     Cursor,
-    DedupStore,
     FetchPage,
     RateLimitHint,
-    RateLimiter,
     RateLimitPolicy,
     RawRecord,
     SyncContext,

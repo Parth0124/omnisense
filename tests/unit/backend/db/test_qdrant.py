@@ -18,7 +18,6 @@ a blackholed host this probe once measured 5s while PostgreSQL measured 60s -- s
 
 from __future__ import annotations
 
-import asyncio
 import socket
 import time
 from typing import Any
@@ -162,8 +161,9 @@ class TestEnsureCollectionGuardsGeometry:
         assert (name, size) == ("omnisense_signals", 1536)
 
     async def test_is_idempotent_when_geometry_matches(self, fake_client: Any) -> None:
-        import backend.db.qdrant as mod
         from qdrant_client.models import Distance
+
+        import backend.db.qdrant as mod
 
         fake_client.existing = _FakeCollection(1536, Distance.COSINE)
         await mod.ensure_collection("omnisense_signals", vector_size=1536)
@@ -171,8 +171,9 @@ class TestEnsureCollectionGuardsGeometry:
 
     async def test_rejects_a_dimension_mismatch(self, fake_client: Any) -> None:
         """The expensive mistake: re-pointing at a collection of the wrong size."""
-        import backend.db.qdrant as mod
         from qdrant_client.models import Distance
+
+        import backend.db.qdrant as mod
 
         fake_client.existing = _FakeCollection(1024, Distance.COSINE)
         with pytest.raises(ConfigurationError) as excinfo:
