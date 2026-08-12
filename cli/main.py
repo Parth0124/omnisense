@@ -15,8 +15,10 @@ importing config, so they reach a connector as constructor arguments. That leave
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import os
 import sys
+from collections.abc import Iterator
 from pathlib import Path
 
 # Inlined rather than assigned to a name first. A module-level assignment before
@@ -37,6 +39,7 @@ from models.enums import Platform
 from models.orm.artifact import SourceRow
 from models.project import normalize_slug
 from services.artifact_sync import STREAMS
+from services.catchup_service import MAX_ARTIFACTS, build_catchup_service, parse_since
 from services.project_service import ProjectService, build_project_service
 
 __all__ = ["app", "main"]
@@ -82,6 +85,40 @@ app = typer.Typer(
     no_args_is_help=True,
     help="OmniSense -- point it at your projects and ask what happened.",
 )
+
+
+@contextlib.contextmanager
+def _quiet_import_warnings() -> Iterator[None]:
+    """Silence third-party deprecation notices raised while importing.
+
+    Importing the agent layer pulls in LangGraph, which warns that a LangChain
+    default will change in a future release. That is addressed to whoever
+    upgrades the dependency, and it lands above a briefing written for somebody
+    who did not ask.
+
+    **Why this replaces `showwarning` instead of adding a filter.**
+    `langchain_core._api.deprecation` calls
+    `warnings.filterwarnings("default", ...)` on its own categories at import
+    time. A filter added later is prepended, so theirs wins over anything set
+    beforehand -- including `-W ignore` and `catch_warnings(); simplefilter
+    ("ignore")`, both of which were tried and both of which still printed it.
+    Swapping the *sink* is a layer below the filters, which is the only place
+    left that they cannot override.
+
+    Scoped to one import, and restored in a `finally`. Warnings raised anywhere
+    else -- and every warning the test suite and the workers see -- are
+    untouched: suppressing where a warning would be read is housekeeping;
+    suppressing where it would be caught is how a breaking upgrade lands
+    silently.
+    """
+    import warnings
+
+    original = warnings.showwarning
+    warnings.showwarning = lambda *args, **kwargs: None
+    try:
+        yield
+    finally:
+        warnings.showwarning = original
 
 
 @app.callback()
@@ -529,6 +566,100 @@ def sync(
             )
 
     asyncio.run(run())
+
+
+# --------------------------------------------------------------------------- #
+# catchup
+# --------------------------------------------------------------------------- #
+
+
+@app.command()
+def catchup(
+    slug: str = typer.Argument(..., help="Which project to brief on."),
+    since: str = typer.Option("2w", "--since", help="A duration (2w, 10d, 36h) or a date."),
+    limit: int = typer.Option(
+        MAX_ARTIFACTS, "--limit", help="Most artifacts to consider in one briefing."
+    ),
+    show_citations: bool = typer.Option(
+        True, "--citations/--no-citations", help="Print what each paragraph rests on."
+    ),
+) -> None:
+    """What happened while you were away.
+
+    Every paragraph cites the artifacts it rests on, and those citations are
+    checked against the database before printing -- a paragraph that cannot cite
+    anything real is dropped rather than shown. That is not decoration: a
+    narrative read off a list of commits is exactly the thing a language model
+    writes fluently and wrongly, and the citation is the only part a reader can
+    verify without going and looking.
+    """
+
+    async def run() -> None:
+        await _check_database()
+
+        try:
+            start = parse_since(since)
+        except ValueError as error:
+            _die(str(error))
+            return
+
+        with _quiet_import_warnings():
+            service = build_catchup_service(tenant_id="local")
+        try:
+            brief = await service.brief(slug, since=start, limit=limit)
+        except NotFoundError:
+            _die(f"No project called {slug!r}.", "See what exists with:  omnisense project list")
+            return
+
+        typer.echo("")
+        typer.secho(
+            f"{brief.project}  ·  {brief.since:%d %b %Y} to {brief.until:%d %b %Y}", bold=True
+        )
+        counted = f"{brief.considered} artifacts"
+        if brief.omitted:
+            # Never silently. A briefing that dropped three weeks reads exactly
+            # like a briefing of a quiet three weeks.
+            counted += f"  ({brief.omitted} older ones left out — raise --limit to include them)"
+        typer.secho(f"  {counted}", dim=True)
+        typer.echo("")
+
+        if brief.is_empty:
+            typer.echo(f"  {brief.headline}")
+            typer.echo("")
+            return
+
+        typer.secho(f"  {brief.headline}", bold=True)
+        typer.echo("")
+
+        for phase in brief.phases:
+            typer.secho(f"  {phase.period}  ·  {phase.label}", fg=typer.colors.CYAN, bold=True)
+            for line in _wrap(phase.narrative, width=74):
+                typer.echo(f"    {line}")
+            if show_citations:
+                for citation in phase.citations:
+                    typer.secho(
+                        f"      ↳ {citation.occurred_at:%d %b}  {citation.title[:58]}", dim=True
+                    )
+            typer.echo("")
+
+        if brief.dropped_phases:
+            # Surfaced rather than swallowed: a model that keeps inventing the
+            # same phase is telling us the prompt is wrong, and a silent filter
+            # would hide that from the only person who could fix it.
+            typer.secho(
+                f"  {len(brief.dropped_phases)} paragraph(s) dropped for citing nothing real: "
+                + ", ".join(brief.dropped_phases),
+                fg=typer.colors.YELLOW,
+            )
+            typer.echo("")
+
+    asyncio.run(run())
+
+
+def _wrap(text: str, *, width: int) -> list[str]:
+    import textwrap
+
+    return textwrap.wrap(" ".join(text.split()), width=width) or [""]
 
 
 @project_app.command("pause")
