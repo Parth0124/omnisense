@@ -410,7 +410,13 @@ def map_workflow_run(
         platform=Platform.GITHUB,
         native_id=str(node_id),
         url=payload.get("html_url"),
-        title=payload.get("name") or payload.get("display_title"),
+        # `display_title` first, which is the *run's* title -- the message of the
+        # commit that triggered it, and what GitHub itself shows in the Actions
+        # list. `name` is the workflow's name, identical on every run it ever
+        # produces: four runs of one workflow stored four rows all reading
+        # "Full-Stack CI/CD - Deploy Frontend & Backend", with nothing to tell
+        # them apart. The workflow name is not lost -- it is in `details`.
+        title=payload.get("display_title") or payload.get("name"),
         body=None,
         occurred_at=started,
         updated_at_source=completed,

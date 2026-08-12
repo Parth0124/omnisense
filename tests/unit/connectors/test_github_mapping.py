@@ -291,6 +291,30 @@ def run_payload(**overrides):
 
 
 class TestWorkflowRuns:
+    def test_the_title_distinguishes_runs_of_the_same_workflow(self) -> None:
+        """`name` is the workflow's name and is identical on every run it ever
+        produces. `display_title` is the triggering commit's message, which is what
+        GitHub shows in the Actions list and the only thing that tells four runs of
+        one pipeline apart -- four rows all reading "Full-Stack CI/CD" is a list
+        nobody can use."""
+        artifact = map_workflow_run(
+            run_payload(name="Full-Stack CI/CD", display_title="Delete DEPLOYMENT.md"),
+            source_id=SRC,
+        )
+
+        assert artifact is not None
+        assert artifact.title == "Delete DEPLOYMENT.md"
+        # Not lost, just moved somewhere it is not the row's identity.
+        assert artifact.details.workflow_name == "Full-Stack CI/CD"
+
+    def test_the_workflow_name_is_the_fallback(self) -> None:
+        """Older runs and some event types carry no `display_title`, and a titleless
+        row is worse than a repeated one."""
+        artifact = map_workflow_run(run_payload(name="pre-commit"), source_id=SRC)
+
+        assert artifact is not None
+        assert artifact.title == "pre-commit"
+
     def test_finished_and_succeeded_are_separate_facts(self) -> None:
         artifact = map_workflow_run(run_payload(conclusion="failure"), source_id=SRC)
         assert artifact is not None
