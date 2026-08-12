@@ -53,7 +53,7 @@ class FakeProjectService:
         self.projects[resolved] = project
         return project
 
-    async def list(self, *, include_inactive: bool = False) -> list[Project]:
+    async def list_projects(self, *, include_inactive: bool = False) -> list[Project]:
         return [p for p in self.projects.values() if include_inactive or p.is_active]
 
     async def get(self, slug: str) -> Project:

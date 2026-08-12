@@ -36,6 +36,7 @@ from models.artifact import source_id
 from models.enums import Platform
 from models.orm.artifact import SourceRow
 from models.project import normalize_slug
+from services.artifact_sync import STREAMS
 from services.project_service import ProjectService, build_project_service
 
 __all__ = ["app", "main"]
@@ -310,7 +311,7 @@ def project_list(
     async def run() -> None:
         await _check_database()
         service = _service()
-        projects = await service.list(include_inactive=all_projects)
+        projects = await service.list_projects(include_inactive=all_projects)
         if not projects:
             typer.echo("No projects yet. Create one with:  omnisense init")
             return
@@ -399,6 +400,133 @@ def project_remove_repo(slug: str, repo: str) -> None:
         await service.detach_source(source_id=match.source_id)
         typer.secho(f"Detached {match.name} from {slug}.", fg=typer.colors.GREEN)
         typer.echo("Its artifacts are kept — they simply stop answering project questions.")
+
+    asyncio.run(run())
+
+
+@app.command()
+def sync(
+    slug: str = typer.Argument(..., help="Which project to sync."),
+    days: int = typer.Option(90, "--days", help="How far back a first sync reaches."),
+    max_pages: int = typer.Option(20, "--max-pages", help="Page ceiling per stream."),
+    stream: list[str] = typer.Option(
+        [],
+        "--stream",
+        help=f"Sync only these streams (repeatable). One of: {', '.join(STREAMS)}.",
+    ),
+    reset: bool = typer.Option(
+        False,
+        "--reset",
+        help="Forget where the last sync got to, so --days applies again.",
+    ),
+) -> None:
+    """Read commits, pull requests, reviews and CI runs into the database.
+
+    `--stream` exists because the four cost wildly different amounts. Reviews
+    alone can want a request per pull request, so without a token -- 60 an hour --
+    a full sync spends everything there and the cheap streams never run. Naming
+    one makes the thing testable on a public repository.
+
+    `--days` is the floor for a *first* sync only. After that each stream
+    remembers where it got to, and that position outranks `--days` -- which is
+    what stops a nightly sync re-reading a year every night, and also what makes
+    a later `--days 730` silently do nothing. `--reset` clears the position so the
+    wider window applies. Re-reading is safe: every write is an upsert, so it
+    costs requests rather than duplicate rows.
+    """
+    chosen = tuple(stream) or STREAMS
+    unknown = [name for name in chosen if name not in STREAMS]
+    if unknown:
+        _die(
+            f"Unknown stream {unknown[0]!r}.",
+            f"Pick from: {', '.join(STREAMS)}",
+        )
+
+    async def run() -> None:
+        await _check_database()
+        service = _service()
+        try:
+            await service.get(slug)
+            source_ids = await service.resolve_source_ids(slug)
+        except NotFoundError:
+            _die(f"No project called {slug!r}.", "See what exists with:  omnisense project list")
+            return
+
+        if not source_ids:
+            _die(
+                f"{slug!r} has no repositories.",
+                f"Add one with:  omnisense project add-repo {slug} owner/name",
+            )
+            return
+
+        token = github_token()
+        if not token:
+            typer.secho(
+                "No GITHUB_TOKEN — only public repositories will sync, and at a much "
+                "lower rate limit (60 requests an hour rather than 5,000).",
+                fg=typer.colors.YELLOW,
+            )
+            typer.echo("")
+
+        from services.artifact_sync import build_artifact_sync
+
+        syncer = build_artifact_sync(token=token)
+        typer.secho(f"Syncing {slug}\n", bold=True)
+
+        if reset:
+            typer.secho(
+                f"Re-reading the last {days} days from scratch — existing rows are "
+                "updated in place, not duplicated.",
+                fg=typer.colors.YELLOW,
+            )
+            typer.echo("")
+
+        reports = await syncer.sync_project(
+            source_ids,
+            streams=chosen,
+            max_pages=max_pages,
+            backfill_days=days,
+            reset=reset,
+        )
+
+        total = 0
+        for report in reports:
+            typer.secho(f"  {report.source_name}", bold=True)
+            for stream in report.streams:
+                if stream.error:
+                    typer.secho(f"    {stream.stream:<15} {stream.error}", fg=typer.colors.RED)
+                    continue
+                # "fetched" and "written" differ when a payload was skipped as
+                # unmappable -- a draft release, a pending review -- and the gap
+                # is worth seeing rather than smoothing over.
+                suffix = "" if stream.complete else "  (stopped at the page limit)"
+                typer.echo(
+                    f"    {stream.stream:<15} {stream.written:>6} stored"
+                    f"  of {stream.fetched} read{suffix}"
+                )
+            total += report.written
+            typer.echo("")
+
+        typer.secho(f"{total:,} artifacts stored.", fg=typer.colors.GREEN, bold=True)
+        typer.echo(f"  {reports[-1].rate_limit if reports else ''}")
+        # Two ways to stop early, and the advice is opposite for each: a rate
+        # limit resumes on its own, an auth failure repeats forever until the
+        # token changes. Telling someone with a bad token to "run it again" sends
+        # them round the same loop.
+        reasons = {r.stop_reason for r in reports if r.stop_reason}
+        if "auth" in reasons:
+            typer.secho(
+                "\nStopped: GitHub refused the credentials. Running it again will "
+                "not help — the token is missing, expired, or has no read access "
+                "to that repository. Set GITHUB_TOKEN and try again.",
+                fg=typer.colors.RED,
+            )
+        elif "quota" in reasons:
+            typer.secho(
+                "\nStopped early on the rate limit. Nothing is lost — run it again "
+                "and it resumes where it left off.",
+                fg=typer.colors.YELLOW,
+            )
 
     asyncio.run(run())
 

@@ -248,7 +248,16 @@ class ProjectService:
         async with self._session_factory() as session:
             return _as_project(await self._require_project(session, slug))
 
-    async def list(self, *, include_inactive: bool = False) -> list[Project]:
+    async def list_projects(self, *, include_inactive: bool = False) -> list[Project]:
+        """Every project, newest first.
+
+        Named `list_projects` rather than `list`: a method called `list` shadows
+        the builtin for the *rest of the class body*, so every later `-> list[...]`
+        annotation silently resolves to this method instead of the type. Nothing
+        breaks at runtime -- `from __future__ import annotations` keeps them
+        strings -- but the file stops type-checking, and anything that evaluates
+        annotations for real (Pydantic, FastAPI, `get_type_hints`) would raise.
+        """
         async with self._session_factory() as session:
             statement = select(ProjectRow).where(ProjectRow.tenant_id == self._tenant_id)
             if not include_inactive:

@@ -348,9 +348,16 @@ class CommitDetails(StrictModel):
         default=None, description="Person id, when it differs from the artifact's actor."
     )
     committed_at: datetime | None = None
-    additions: int = 0
-    deletions: int = 0
-    changed_files: int = 0
+
+    # `None`, not `0`, and the distinction is load-bearing. GitHub's *list*
+    # endpoint omits `stats` and `files` entirely -- they arrive only from the
+    # single-commit endpoint, at one request each. Defaulting to zero makes an
+    # unfetched commit indistinguishable from one that changed nothing, so
+    # "the biggest change last week" silently answers from a table of zeroes.
+    # `has_conflicts` below already draws this line; these now match it.
+    additions: int | None = Field(default=None, description="`None` means not fetched.")
+    deletions: int | None = Field(default=None, description="`None` means not fetched.")
+    changed_files: int | None = Field(default=None, description="`None` means not fetched.")
     files: list[FileChange] = Field(default_factory=list)
     is_merge: bool = False
     verified: bool | None = Field(default=None, description="Signature verified by the platform.")
@@ -376,10 +383,13 @@ class PullRequestDetails(StrictModel):
     has_conflicts: bool | None = Field(
         default=None, description="`None` means the platform has not computed mergeability yet."
     )
-    additions: int = 0
-    deletions: int = 0
-    changed_files: int = 0
-    commit_count: int = 0
+    # `None` rather than `0`, for the same reason as `CommitDetails` -- the pull
+    # request *list* endpoint carries none of these, and a zero here would read
+    # as an empty pull request rather than an unfetched one.
+    additions: int | None = Field(default=None, description="`None` means not fetched.")
+    deletions: int | None = Field(default=None, description="`None` means not fetched.")
+    changed_files: int | None = Field(default=None, description="`None` means not fetched.")
+    commit_count: int | None = Field(default=None, description="`None` means not fetched.")
     requested_reviewer_ids: list[str] = Field(default_factory=list)
     labels: list[str] = Field(default_factory=list)
 

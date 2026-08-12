@@ -84,7 +84,7 @@ async def list_projects(
         Query(description="Include paused projects. They keep their history either way."),
     ] = False,
 ) -> list[ProjectSummary]:
-    projects = await service.list(include_inactive=include_inactive)
+    projects = await service.list_projects(include_inactive=include_inactive)
     return [ProjectSummary(**_summary(project)) for project in projects]
 
 

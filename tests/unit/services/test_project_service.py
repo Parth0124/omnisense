@@ -301,8 +301,8 @@ class TestReading:
         await service.create(name="Paused", slug="paused")
         await service.set_active(slug="paused", is_active=False)
 
-        assert [p.slug for p in await service.list()] == ["live"]
-        assert [p.slug for p in await service.list(include_inactive=True)] == [
+        assert [p.slug for p in await service.list_projects()] == ["live"]
+        assert [p.slug for p in await service.list_projects(include_inactive=True)] == [
             "live",
             "paused",
         ]
@@ -315,7 +315,7 @@ class TestReading:
         doing it."""
         await ProjectService(factory, tenant_id="a").create(name="Mine", slug="mine")
 
-        assert await ProjectService(factory, tenant_id="b").list() == []
+        assert await ProjectService(factory, tenant_id="b").list_projects() == []
         with pytest.raises(NotFoundError):
             await ProjectService(factory, tenant_id="b").get("mine")
 
