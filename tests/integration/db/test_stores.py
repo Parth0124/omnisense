@@ -19,7 +19,7 @@ codebase:
 
 from __future__ import annotations
 
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 
 import pytest
 
@@ -42,18 +42,28 @@ class TestPostgres:
         layers into a service call — and the most common state of a fresh
         checkout is exactly this one, `make up` done and `make migrate`
         forgotten.
+
+        Not restricted to `public`. Every table lives in the `omnisense` schema,
+        and pinning the query to `public` made this assert that a correctly
+        migrated database was unmigrated — a guard that fails on the healthy case
+        is worse than no guard, because the message it prints ("run make migrate")
+        sends somebody to re-run the thing that already worked.
         """
         from sqlalchemy import text
 
         async with pg_sessionmaker() as session:
             rows = (
-                await session.execute(
-                    text(
-                        "SELECT table_name FROM information_schema.tables "
-                        "WHERE table_schema = 'public'"
+                (
+                    await session.execute(
+                        text(
+                            "SELECT table_name FROM information_schema.tables "
+                            "WHERE table_schema NOT IN ('pg_catalog', 'information_schema')"
+                        )
                     )
                 )
-            ).scalars().all()
+                .scalars()
+                .all()
+            )
 
         present = set(rows)
         expected = {"signals", "investigations", "reports"}
@@ -77,9 +87,7 @@ class TestPostgres:
 
         async with pg_sessionmaker() as session:
             value = (
-                await session.execute(
-                    text("SELECT CAST(:ts AS timestamptz) AS ts"), {"ts": NOW}
-                )
+                await session.execute(text("SELECT CAST(:ts AS timestamptz) AS ts"), {"ts": NOW})
             ).scalar_one()
 
         assert value.tzinfo is not None, (
@@ -110,9 +118,7 @@ class TestRedis:
         """
         from agents.memory.scratchpad import RedisScratchpadStore, Scratchpad
 
-        pad = Scratchpad(
-            RedisScratchpadStore(redis_client), key=f"{run_namespace}:scratch"
-        )
+        pad = Scratchpad(RedisScratchpadStore(redis_client), key=f"{run_namespace}:scratch")
         try:
             assert await pad.put("plan", {"steps": [1, 2, 3], "nested": {"a": True}})
             assert await pad.get("plan") == {"steps": [1, 2, 3], "nested": {"a": True}}
@@ -167,8 +173,12 @@ class TestOpenSearch:
 
 class TestReadinessAgainstRealStores:
     async def test_readyz_reports_ok_when_everything_is_up(
-        self, postgres_available, neo4j_available, redis_available,
-        qdrant_available, opensearch_available,
+        self,
+        postgres_available,
+        neo4j_available,
+        redis_available,
+        qdrant_available,
+        opensearch_available,
     ) -> None:
         """The inverse of the unit test, and the half that matters operationally.
 
@@ -188,7 +198,6 @@ class TestReadinessAgainstRealStores:
 
         body = response.json()
         assert response.status_code == 200, (
-            f"/readyz returned {response.status_code} with every store up: "
-            f"{body.get('checks')}"
+            f"/readyz returned {response.status_code} with every store up: {body.get('checks')}"
         )
         assert body["status"] == "ok", f"degraded: {body.get('degraded')}"

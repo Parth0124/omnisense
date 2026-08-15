@@ -258,6 +258,36 @@ class GitHubReader:
         payload: dict[str, Any] = response.json()
         return payload
 
+    async def viewer_repositories(
+        self, *, max_pages: int = 10, include_forks: bool = False
+    ) -> AsyncIterator[dict[str, Any]]:
+        """Every repository the token can see, newest-pushed first.
+
+        `affiliation` is the whole point of the endpoint. Without it GitHub
+        returns only repositories the account *owns*, which for anybody working
+        on a team is the least interesting subset -- their own side projects,
+        and none of the work they are actually paid for. `collaborator` and
+        `organization_member` are where a job lives.
+
+        Sorted by `pushed`, so the ceiling below keeps the *active* end of a long
+        list. Somebody with four hundred repositories has four hundred because
+        most of them are finished, and the ones worth proposing are the ones that
+        moved recently.
+
+        Forks are excluded by default. A fork is usually somebody else's project
+        cloned to send one patch; ingesting its whole history attributes their
+        work to you, which is worse than missing it. `--include-forks` is there
+        for the case where the fork *is* the work.
+        """
+        async for repo in self._paginate(
+            "/user/repos",
+            {"affiliation": "owner,collaborator,organization_member", "sort": "pushed"},
+            max_pages=max_pages,
+        ):
+            if repo.get("fork") and not include_forks:
+                continue
+            yield repo
+
     async def commits(
         self, owner: str, repo: str, *, since: datetime | None = None, max_pages: int = 100
     ) -> AsyncIterator[dict[str, Any]]:

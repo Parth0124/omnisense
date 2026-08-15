@@ -20,6 +20,7 @@ import os
 import sys
 from collections.abc import Iterator
 from pathlib import Path
+from typing import Any
 
 # Inlined rather than assigned to a name first. A module-level assignment before
 # the imports makes every one of them "not at top of file"; a bare conditional
@@ -34,12 +35,16 @@ from dotenv import dotenv_values
 
 from backend.core.exceptions import ConflictError, NotFoundError, OmniSenseError
 from cli.github_probe import probe_repository
-from models.artifact import source_id
+from models.artifact import WatchStatus, source_id
 from models.enums import Platform
 from models.orm.artifact import SourceRow
 from models.project import normalize_slug
 from services.artifact_sync import STREAMS
+from services.blocking_service import build_blocking_service
 from services.catchup_service import MAX_ARTIFACTS, build_catchup_service, parse_since
+from services.discovery_service import DiscoveryService, build_discovery_service
+from services.feature_service import FeatureService, build_feature_service
+from services.identity_service import IdentityService, build_identity_service
 from services.project_service import ProjectService, build_project_service
 
 __all__ = ["app", "main"]
@@ -132,6 +137,14 @@ def _configure(
 
 project_app = typer.Typer(no_args_is_help=True, help="Inspect and manage projects.")
 app.add_typer(project_app, name="project")
+
+people_app = typer.Typer(no_args_is_help=True, help="Who is who, across platforms.")
+app.add_typer(people_app, name="people")
+
+feature_app = typer.Typer(
+    no_args_is_help=True, help="Versions, features, and what belongs to them."
+)
+app.add_typer(feature_app, name="feature")
 
 
 def github_token() -> str | None:
@@ -443,7 +456,9 @@ def project_remove_repo(slug: str, repo: str) -> None:
 
 @app.command()
 def sync(
-    slug: str = typer.Argument(..., help="Which project to sync."),
+    slug: str = typer.Argument(
+        "", help="Optional. A single project; omit to sync everything you watch."
+    ),
     days: int = typer.Option(90, "--days", help="How far back a first sync reaches."),
     max_pages: int = typer.Option(20, "--max-pages", help="Page ceiling per stream."),
     stream: list[str] = typer.Option(
@@ -464,6 +479,12 @@ def sync(
     a full sync spends everything there and the cheap streams never run. Naming
     one makes the thing testable on a public repository.
 
+    With no argument it syncs **everything you have approved**, across every
+    project and every repository with no project at all. That is the default
+    because the questions this system answers are not project-shaped -- "what
+    happened last week" spans every repository you touch, and having to name one
+    is the interface getting in the way of its own premise.
+
     `--days` is the floor for a *first* sync only. After that each stream
     remembers where it got to, and that position outranks `--days` -- which is
     what stops a nightly sync re-reading a year every night, and also what makes
@@ -481,20 +502,35 @@ def sync(
 
     async def run() -> None:
         await _check_database()
-        service = _service()
-        try:
-            await service.get(slug)
-            source_ids = await service.resolve_source_ids(slug)
-        except NotFoundError:
-            _die(f"No project called {slug!r}.", "See what exists with:  omnisense project list")
-            return
-
-        if not source_ids:
-            _die(
-                f"{slug!r} has no repositories.",
-                f"Add one with:  omnisense project add-repo {slug} owner/name",
-            )
-            return
+        if slug:
+            service = _service()
+            try:
+                await service.get(slug)
+                source_ids = await service.resolve_source_ids(slug)
+            except NotFoundError:
+                _die(
+                    f"No project called {slug!r}.",
+                    "See what exists with:  omnisense project list",
+                )
+                return
+            if not source_ids:
+                _die(
+                    f"{slug!r} has no repositories.",
+                    f"Add one with:  omnisense project add-repo {slug} owner/name",
+                )
+                return
+        else:
+            # Everything approved, project or not. `included_source_ids` is the
+            # only gate: a pending source has never been decided about and a
+            # skipped one has been decided against, and reading from either would
+            # make the review queue decorative.
+            source_ids = await _discovery_service().included_source_ids()
+            if not source_ids:
+                _die(
+                    "Nothing to sync — no source has been approved yet.",
+                    "Find some with:  omnisense discover",
+                )
+                return
 
         token = github_token()
         if not token:
@@ -508,7 +544,8 @@ def sync(
         from services.artifact_sync import build_artifact_sync
 
         syncer = build_artifact_sync(token=token)
-        typer.secho(f"Syncing {slug}\n", bold=True)
+        label = slug or f"everything you watch ({len(source_ids)} source(s))"
+        typer.secho(f"Syncing {label}\n", bold=True)
 
         if reset:
             typer.secho(
@@ -660,6 +697,659 @@ def _wrap(text: str, *, width: int) -> list[str]:
     import textwrap
 
     return textwrap.wrap(" ".join(text.split()), width=width) or [""]
+
+
+# --------------------------------------------------------------------------- #
+# people
+# --------------------------------------------------------------------------- #
+
+
+def _identity_service() -> IdentityService:
+    return build_identity_service(tenant_id="local")
+
+
+@people_app.command("list")
+def people_list() -> None:
+    """Every human the system knows about, and the accounts behind them."""
+
+    async def run() -> None:
+        await _check_database()
+        service = _identity_service()
+        identities = await service.list_identities()
+        unlinked = await service.unlinked()
+
+        if not identities and not unlinked:
+            typer.echo("\nNobody yet. Sync a repository first:  omnisense sync <project>")
+            return
+
+        typer.echo("")
+        for identity in identities:
+            marker = "  (needs review)" if identity.needs_review else ""
+            typer.secho(f"  {identity.display_name}{marker}", bold=True)
+            for account in identity.accounts:
+                # The method is printed, always. A link is only as good as how it
+                # was arrived at, and hiding that makes a coincidence look like a
+                # fact -- which is the one failure this whole feature exists to
+                # prevent.
+                how = "confirmed" if account.is_confirmed else f"{account.method.value} guess"
+                typer.echo(f"    {account.platform.value:<10} {account.handle or '?':<22} {how}")
+            typer.echo("")
+
+        if unlinked:
+            typer.secho(f"  {len(unlinked)} account(s) not attached to anyone:", dim=True)
+            for person in unlinked:
+                typer.echo(f"    {person.platform.value:<10} {person.handle or person.external_id}")
+            typer.echo("")
+            typer.echo("  Give each one an identity:  omnisense people adopt")
+
+    asyncio.run(run())
+
+
+@people_app.command("adopt")
+def people_adopt() -> None:
+    """Give every unattached account an identity of its own.
+
+    Deliberately not a merge. Two accounts are two people until there is a reason
+    to think otherwise, and starting from that costs nothing but a `people link`
+    later -- whereas starting from a guess means somebody else's work is already
+    filed under your name before anyone looks.
+    """
+
+    async def run() -> None:
+        await _check_database()
+        created = await _identity_service().adopt_unlinked()
+        if not created:
+            typer.echo("\nEvery account already belongs to somebody.")
+            return
+        typer.secho(
+            f"\nCreated {created} identit{'y' if created == 1 else 'ies'}.", fg=typer.colors.GREEN
+        )
+        typer.echo("  See them with:  omnisense people list")
+        typer.echo("  Merge two:      omnisense people suggest")
+
+    asyncio.run(run())
+
+
+@people_app.command("suggest")
+def people_suggest() -> None:
+    """Accounts that might be the same human. Proposes only -- changes nothing."""
+
+    async def run() -> None:
+        await _check_database()
+        suggestions = await _identity_service().suggest()
+
+        if not suggestions:
+            typer.echo("\nNothing to suggest — every account is either attached or unmatched.")
+            return
+
+        typer.echo("")
+        typer.secho(f"  {len(suggestions)} possible match(es):", bold=True)
+        typer.echo("")
+        for suggestion in suggestions:
+            typer.secho(
+                f"    {suggestion.confidence:.0%}  {suggestion.identity_name}",
+                fg=typer.colors.CYAN,
+            )
+            # The evidence itself, not just its name. Nobody can judge
+            # "0.6, handle"; anybody can judge "both are `parth`" instantly.
+            typer.echo(f"        matched on {suggestion.method.value}: {suggestion.evidence}")
+            typer.echo(
+                f"        omnisense people link {suggestion.person_id} {suggestion.identity_id}"
+            )
+            typer.echo("")
+
+        typer.secho(
+            "  Nothing was changed. Merging two people who are not the same is much "
+            "worse\n  than leaving them apart, so every link is yours to make.",
+            dim=True,
+        )
+
+    asyncio.run(run())
+
+
+@people_app.command("link")
+def people_link(
+    person_id: str = typer.Argument(..., help="The account to attach."),
+    identity_id: str = typer.Argument(..., help="The human to attach it to."),
+) -> None:
+    """Attach an account to a human. Recorded as confirmed, because you said so."""
+
+    async def run() -> None:
+        await _check_database()
+        try:
+            await _identity_service().link(person_id=person_id, identity=identity_id)
+        except NotFoundError as error:
+            _die(str(error))
+            return
+        except ConflictError as error:
+            _die(str(error))
+            return
+        typer.secho("\nLinked.", fg=typer.colors.GREEN)
+
+    asyncio.run(run())
+
+
+@people_app.command("unlink")
+def people_unlink(person_id: str = typer.Argument(..., help="The account to detach.")) -> None:
+    """Detach an account. The human and their other accounts are untouched."""
+
+    async def run() -> None:
+        await _check_database()
+        try:
+            await _identity_service().unlink(person_id)
+        except NotFoundError:
+            _die(f"{person_id!r} is not attached to anybody.")
+            return
+        typer.secho("\nUnlinked.", fg=typer.colors.GREEN)
+
+    asyncio.run(run())
+
+
+# --------------------------------------------------------------------------- #
+# features
+# --------------------------------------------------------------------------- #
+
+
+def _feature_service() -> FeatureService:
+    return build_feature_service(tenant_id="local")
+
+
+@feature_app.command("version")
+def feature_version(
+    project: str = typer.Argument(..., help="Which project."),
+    name: str = typer.Argument(..., help="v1, v1.1, 'launch'."),
+    description: str = typer.Option("", "--description", help="What this release is."),
+) -> None:
+    """Declare a version. A version holds features; features hold the work."""
+
+    async def run() -> None:
+        await _check_database()
+        try:
+            await _feature_service().add_version(
+                project=project, name=name, description=description or None
+            )
+        except (NotFoundError, ConflictError) as error:
+            _die(str(error))
+            return
+        typer.secho(f"\nAdded version {name}.", fg=typer.colors.GREEN)
+        typer.echo(
+            f'  Now add features:  omnisense feature add {project} "<name>" --version {name}'
+        )
+
+    asyncio.run(run())
+
+
+@feature_app.command("add")
+def feature_add(
+    project: str = typer.Argument(..., help="Which project."),
+    name: str = typer.Argument(..., help='What the capability is, e.g. "image upload".'),
+    version: str = typer.Option("", "--version", help="Which version it belongs to."),
+    keyword: list[str] = typer.Option(
+        [],
+        "--keyword",
+        help="Extra words the commits actually use. Repeatable.",
+    ),
+    description: str = typer.Option("", "--description"),
+) -> None:
+    """Declare a feature.
+
+    `--keyword` matters more than it looks. A feature called "image upload" will
+    not match a commit that says "implemented cloudinary service" -- and that
+    commit is the feature. The keyword is where you put the word the work was
+    actually named after.
+    """
+
+    async def run() -> None:
+        await _check_database()
+        try:
+            await _feature_service().add_feature(
+                project=project,
+                name=name,
+                version=version or None,
+                keywords=keyword,
+                description=description or None,
+            )
+        except (NotFoundError, ConflictError) as error:
+            _die(str(error))
+            return
+        typer.secho(f"\nAdded feature {name!r}.", fg=typer.colors.GREEN)
+        typer.echo(f"  Attach the work to it:  omnisense feature sort {project}")
+
+    asyncio.run(run())
+
+
+@feature_app.command("sort")
+def feature_sort(project: str = typer.Argument(..., help="Which project.")) -> None:
+    """Work out which artifacts belong to which features.
+
+    Safe to run after every sync. Anything you have confirmed or rejected is left
+    alone -- a correction that gets undone by the next pass is one nobody makes
+    twice.
+    """
+
+    async def run() -> None:
+        await _check_database()
+        try:
+            report = await _feature_service().sort(project)
+        except NotFoundError as error:
+            _die(str(error))
+            return
+
+        typer.echo("")
+        if report.scanned == 0:
+            typer.echo("  Nothing to sort — no artifacts yet.  omnisense sync " + project)
+            return
+        if not report.linked and not report.already_linked:
+            typer.secho(
+                f"  Scanned {report.scanned} artifacts and matched none of them.",
+                fg=typer.colors.YELLOW,
+            )
+            typer.echo(
+                "  The feature names probably do not appear in the commit messages.\n"
+                "  Add the words that do:  omnisense feature add ... --keyword <word>"
+            )
+            return
+
+        typer.secho(f"  {report.linked} newly attached", fg=typer.colors.GREEN, bold=True)
+        typer.echo(f"  {report.already_linked} already attached")
+        if report.protected:
+            typer.echo(f"  {report.protected} left alone — you had decided them")
+        typer.echo(f"  {report.scanned} artifacts scanned")
+        typer.echo("")
+        typer.echo(f"  See the result:  omnisense feature list {project}")
+
+    asyncio.run(run())
+
+
+@feature_app.command("list")
+def feature_list(project: str = typer.Argument(..., help="Which project.")) -> None:
+    """Versions and features, with how much work sits in each."""
+
+    async def run() -> None:
+        await _check_database()
+        service = _feature_service()
+        try:
+            versions = await service.versions(project)
+            features = await service.features(project)
+        except NotFoundError as error:
+            _die(str(error))
+            return
+
+        if not versions and not features:
+            typer.echo("\nNothing declared yet.")
+            typer.echo(f"  omnisense feature version {project} v1")
+            typer.echo(f'  omnisense feature add {project} "image upload" --version v1')
+            return
+
+        typer.echo("")
+        for version in versions:
+            typer.secho(
+                f"  {version.name}  ({version.state.value})", fg=typer.colors.CYAN, bold=True
+            )
+            for feature in (f for f in features if f.version_name == version.name):
+                _echo_feature(feature)
+            typer.echo("")
+
+        loose = [f for f in features if f.version_name is None]
+        if loose:
+            typer.secho("  (no version)", dim=True)
+            for feature in loose:
+                _echo_feature(feature)
+            typer.echo("")
+
+    asyncio.run(run())
+
+
+def _short(identifier: str) -> str:
+    """Enough of an id to type, in the shape git chose for the same problem."""
+    return identifier[:12]
+
+
+def _echo_feature(feature: Any) -> None:
+    # The guessed count is printed beside the total, always. "12 artifacts" and
+    # "12 artifacts, 12 guessed" are the same number meaning very different
+    # things, and only one of them is worth trusting without a look.
+    detail = f"{feature.artifact_count} artifact(s)"
+    if feature.guessed_count:
+        detail += f", {feature.guessed_count} guessed"
+    typer.echo(f"    {feature.name:<28} {detail}")
+
+
+@feature_app.command("show")
+def feature_show(
+    project: str = typer.Argument(..., help="Which project."),
+    name: str = typer.Argument(..., help="Which feature."),
+) -> None:
+    """Everything attached to one feature, and why."""
+
+    async def run() -> None:
+        await _check_database()
+        service = _feature_service()
+        try:
+            features = await service.features(project)
+        except NotFoundError as error:
+            _die(str(error))
+            return
+
+        match = next((f for f in features if f.name.casefold() == name.casefold()), None)
+        if match is None:
+            _die(
+                f"No feature called {name!r} in {project}.",
+                f"See what exists with:  omnisense feature list {project}",
+            )
+            return
+
+        members = await service.members(match.id)
+        typer.echo("")
+        typer.secho(f"  {match.name}", bold=True)
+        typer.echo("")
+        if not members:
+            typer.echo("    Nothing attached yet.  omnisense feature sort " + project)
+            return
+
+        for artifact, link in members:
+            mark = "✓" if link.method.is_decided else " "
+            reason = "you confirmed" if link.method.is_decided else (link.evidence or "")
+            # The *kind* is printed because a commit and the CI run it triggered
+            # now share a title -- two rows reading "Delete deploy.yml" look like
+            # a duplication bug rather than two different things.
+            #
+            # The id prefix is printed because the hint below tells somebody to
+            # pass one, and an instruction naming an argument the screen never
+            # shows is an instruction nobody can follow.
+            typer.echo(
+                f"    {mark} {_short(artifact.id)}  {artifact.occurred_at:%d %b}"
+                f"  {artifact.kind.value:<12} {(artifact.title or '')[:36]:<36}  {reason}"
+            )
+        typer.echo("")
+        typer.secho(
+            "    ✓ means you decided it. Everything else is a guess.\n"
+            f'      omnisense feature reject {project} "{match.name}" <id>\n'
+            "    A few characters of the id is enough, as long as it is unique.",
+            dim=True,
+        )
+
+    asyncio.run(run())
+
+
+def _decide(project: str, name: str, artifact: str, belongs: bool) -> None:
+    async def run() -> None:
+        await _check_database()
+        service = _feature_service()
+        try:
+            features = await service.features(project)
+        except NotFoundError as error:
+            _die(str(error))
+            return
+        match = next((f for f in features if f.name.casefold() == name.casefold()), None)
+        if match is None:
+            _die(f"No feature called {name!r} in {project}.")
+            return
+        try:
+            resolved = await service.resolve_artifact(artifact)
+            await service.decide(feature=match.id, artifact=resolved, belongs=belongs)
+        except (NotFoundError, ConflictError) as error:
+            _die(str(error))
+            return
+        typer.secho(
+            f"\n{'Confirmed' if belongs else 'Rejected'}. This will not be undone by the "
+            "next sort.",
+            fg=typer.colors.GREEN,
+        )
+
+    asyncio.run(run())
+
+
+@feature_app.command("confirm")
+def feature_confirm(
+    project: str = typer.Argument(...),
+    name: str = typer.Argument(..., help="Which feature."),
+    artifact: str = typer.Argument(..., help="Which artifact."),
+) -> None:
+    """Say an artifact does belong to a feature."""
+    _decide(project, name, artifact, belongs=True)
+
+
+@feature_app.command("reject")
+def feature_reject(
+    project: str = typer.Argument(...),
+    name: str = typer.Argument(..., help="Which feature."),
+    artifact: str = typer.Argument(..., help="Which artifact."),
+) -> None:
+    """Say an artifact does not belong to a feature. Sticks across future sorts."""
+    _decide(project, name, artifact, belongs=False)
+
+
+@app.command()
+def blocking(
+    project: str = typer.Argument(..., help="Which project."),
+    target: str = typer.Argument(..., help="A version or a feature name."),
+) -> None:
+    """What is standing in the way of a version or a feature.
+
+    Each blocker says how sure it is. Two of the four rules work by *absence* --
+    "no review exists", "nothing has happened" -- and absence means one thing when
+    the data is being collected and nothing at all when it is not. The caveat is
+    printed rather than left for the reader to know.
+    """
+
+    async def run() -> None:
+        await _check_database()
+        try:
+            report = await build_blocking_service(tenant_id="local").blocking(project, target)
+        except NotFoundError as error:
+            _die(str(error), f"See what exists with:  omnisense feature list {project}")
+            return
+
+        typer.echo("")
+        typer.secho(f"  {report.target}", bold=True)
+        typer.secho(
+            f"  {report.features_checked} feature(s) checked in {report.query_ms:.0f}ms", dim=True
+        )
+        typer.echo("")
+
+        if report.is_clear:
+            typer.secho("  Nothing is blocking it.", fg=typer.colors.GREEN)
+            typer.echo("")
+            return
+
+        for blocker in report.blockers:
+            colour = typer.colors.RED if blocker.confidence >= 0.9 else typer.colors.YELLOW
+            typer.secho(f"    {blocker.feature} — {blocker.summary}", fg=colour)
+            if blocker.since:
+                typer.echo(f"      since {blocker.since:%d %b %Y}")
+            if blocker.caveat:
+                # Printed at the blocker, not in a footnote. A hedge somewhere
+                # else on the page is a hedge nobody reads.
+                typer.secho(f"      ({blocker.caveat})", dim=True)
+            typer.echo("")
+
+    asyncio.run(run())
+
+
+# --------------------------------------------------------------------------- #
+# discovery
+# --------------------------------------------------------------------------- #
+
+
+def _discovery_service() -> DiscoveryService:
+    return build_discovery_service(token=github_token(), tenant_id="local")
+
+
+@app.command()
+def discover(
+    include_forks: bool = typer.Option(
+        False, "--include-forks", help="Also propose repositories you forked."
+    ),
+) -> None:
+    """Find everything your token can see. Reads nothing until you approve it.
+
+    Nothing found here is synced. Every new repository lands as *pending* and
+    stays inert until you say otherwise -- a token sees the tutorial you forked
+    once, the repository somebody added you to for one review, and four archived
+    services, and ingesting all of it costs budget and makes every later answer
+    longer and worse.
+    """
+
+    async def run() -> None:
+        await _check_database()
+        if not github_token():
+            _die(
+                "Discovery needs a GitHub token.",
+                "Add GITHUB_TOKEN to .env — without it GitHub only shows public repos you own.",
+            )
+            return
+
+        typer.echo("\nLooking...")
+        report = await _discovery_service().discover_github(include_forks=include_forks)
+
+        if report.error:
+            typer.secho(f"\n  Stopped: {report.error}", fg=typer.colors.YELLOW)
+            typer.echo(f"  Kept what it found first — {report.new} new.")
+        typer.echo("")
+        typer.secho(f"  {report.found} repositories visible", bold=True)
+        waiting = report.new + report.still_pending
+        typer.echo(f"  {report.new} new")
+        if waiting:
+            typer.secho(f"  {waiting} waiting on you", fg=typer.colors.YELLOW)
+        typer.echo(f"  {report.already_decided} already ingesting")
+        if report.previously_excluded:
+            # Printed so a returning repository does not look like discovery
+            # silently missed it.
+            typer.echo(f"  {report.previously_excluded} you had already excluded")
+        typer.echo("")
+        if waiting:
+            typer.echo("  Review them:  omnisense watch review")
+
+    asyncio.run(run())
+
+
+watch_app = typer.Typer(no_args_is_help=True, help="Choose what gets ingested.")
+app.add_typer(watch_app, name="watch")
+
+
+def _echo_candidate(candidate: Any) -> None:
+    marks = []
+    if candidate.private:
+        marks.append("private")
+    if candidate.archived:
+        marks.append("archived")
+    if candidate.is_dormant:
+        marks.append("dormant")
+    when = f"{candidate.last_activity:%b %Y}" if candidate.last_activity else "never"
+    suffix = f"  ({', '.join(marks)})" if marks else ""
+    typer.echo(f"    {candidate.name:<44} {when:>9}{suffix}")
+
+
+@watch_app.command("review")
+def watch_review() -> None:
+    """Everything waiting on a decision from you."""
+
+    async def run() -> None:
+        await _check_database()
+        pending = await _discovery_service().candidates(WatchStatus.PENDING)
+
+        if not pending:
+            typer.echo("\nNothing waiting. Find more with:  omnisense discover")
+            return
+
+        typer.echo("")
+        typer.secho(f"  {len(pending)} waiting on you", bold=True)
+        typer.secho("  newest activity first", dim=True)
+        typer.echo("")
+        for candidate in pending:
+            _echo_candidate(candidate)
+        typer.echo("")
+        typer.echo("    omnisense watch add <name>       ingest this one")
+        typer.echo("    omnisense watch skip <name>      never ingest it, stop asking")
+        typer.echo("    omnisense watch add --all        ingest everything above")
+
+    asyncio.run(run())
+
+
+@watch_app.command("list")
+def watch_list() -> None:
+    """What is being ingested, and what is not."""
+
+    async def run() -> None:
+        await _check_database()
+        service = _discovery_service()
+        included = await service.candidates(WatchStatus.INCLUDED)
+        pending = await service.candidates(WatchStatus.PENDING)
+        excluded = await service.candidates(WatchStatus.EXCLUDED)
+
+        if not (included or pending or excluded):
+            typer.echo("\nNothing yet.  omnisense discover")
+            return
+
+        typer.echo("")
+        typer.secho(f"  Ingesting ({len(included)})", fg=typer.colors.GREEN, bold=True)
+        for candidate in included:
+            _echo_candidate(candidate)
+        if pending:
+            typer.echo("")
+            typer.secho(f"  Waiting on you ({len(pending)})", fg=typer.colors.YELLOW, bold=True)
+            for candidate in pending:
+                _echo_candidate(candidate)
+        if excluded:
+            typer.echo("")
+            typer.secho(f"  Skipped ({len(excluded)})", dim=True)
+            for candidate in excluded:
+                _echo_candidate(candidate)
+        typer.echo("")
+
+    asyncio.run(run())
+
+
+def _decide_watch(name: str | None, every: bool, include: bool) -> None:
+    async def run() -> None:
+        await _check_database()
+        service = _discovery_service()
+
+        if every:
+            count = await service.decide_all_pending(include=include)
+            verb = "Ingesting" if include else "Skipping"
+            typer.secho(
+                f"\n{verb} {count} repositor{'y' if count == 1 else 'ies'}.", fg=typer.colors.GREEN
+            )
+            return
+
+        if not name:
+            _die("Name a repository, or pass --all.")
+            return
+
+        try:
+            candidate = await service.decide(source=name, include=include)
+        except NotFoundError:
+            _die(
+                f"No source matching {name!r}.",
+                "See what exists with:  omnisense watch list",
+            )
+            return
+        verb = "Ingesting" if include else "Skipping"
+        typer.secho(f"\n{verb} {candidate.name}.", fg=typer.colors.GREEN)
+        if include:
+            typer.echo("  Pull it in with:  omnisense sync")
+
+    asyncio.run(run())
+
+
+@watch_app.command("add")
+def watch_add(
+    name: str = typer.Argument("", help="owner/repo, or the start of its id."),
+    every: bool = typer.Option(False, "--all", help="Everything currently pending."),
+) -> None:
+    """Start ingesting a source."""
+    _decide_watch(name or None, every, include=True)
+
+
+@watch_app.command("skip")
+def watch_skip(
+    name: str = typer.Argument("", help="owner/repo, or the start of its id."),
+    every: bool = typer.Option(False, "--all", help="Everything currently pending."),
+) -> None:
+    """Never ingest a source, and stop proposing it."""
+    _decide_watch(name or None, every, include=False)
 
 
 @project_app.command("pause")

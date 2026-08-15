@@ -40,7 +40,7 @@ from sqlalchemy import (
 )
 from sqlalchemy.orm import Mapped, mapped_column
 
-from models.artifact import ArtifactKind, ArtifactOutcome, ArtifactState
+from models.artifact import ArtifactKind, ArtifactOutcome, ArtifactState, WatchStatus
 from models.enums import Platform
 from models.orm.base import Base, JSONVariant, TolerantEnumType
 from models.orm.mixins import TenantMixin, TimestampMixin, tenant_scoped_index
@@ -76,6 +76,26 @@ class SourceRow(TenantMixin, TimestampMixin, Base):
     default_branch: Mapped[str | None] = mapped_column(String(256), nullable=True)
 
     is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+
+    watch_status: Mapped[WatchStatus] = mapped_column(
+        TolerantEnumType(WatchStatus),
+        nullable=False,
+        default=WatchStatus.INCLUDED,
+        server_default=WatchStatus.INCLUDED.value,
+        index=True,
+    )
+    """Whether this source is synced, and whether we are still asking.
+
+    `server_default` because the column arrives on a table that already holds
+    rows, and every one of those was added by hand -- so the safe backfill is
+    `INCLUDED`, not `PENDING`. Defaulting them to pending would silently stop
+    syncing repositories somebody had already chosen, and the symptom would be a
+    project that quietly went stale rather than an error.
+
+    Indexed because the two hot reads are both filters on it: "what do I sync"
+    and "what is waiting for me to decide".
+    """
+
     source_metadata: Mapped[dict[str, Any]] = mapped_column(
         JSONVariant, nullable=False, default=dict
     )

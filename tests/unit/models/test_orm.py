@@ -44,7 +44,9 @@ from sqlalchemy import (
     String,
     Table,
     UniqueConstraint,
+    and_,
     func,
+    inspect,
     select,
     text,
 )
@@ -61,6 +63,8 @@ from models.enums import (
     SignalStatus,
     SourceCategory,
 )
+from models.feature import MembershipMethod
+from models.identity import LinkMethod
 from models.orm.artifact import ArtifactRow, PersonRow, SourceRow
 from models.orm.base import Base, TolerantEnumType, metadata
 
@@ -80,6 +84,8 @@ from models.orm.connector_account import (
     ConnectorAccountStatus,
     ConnectorCursorRow,
 )
+from models.orm.feature import FeatureLinkRow, FeatureRow, VersionRow
+from models.orm.identity import IdentityLinkRow, IdentityRow
 from models.orm.investigation import InvestigationRow, InvestigationStepRow, StepStatus
 from models.orm.mixins import DEFAULT_TENANT
 from models.orm.project import ProjectRow
@@ -318,6 +324,16 @@ def make_project() -> ProjectRow:
 
 
 async def seed_project(session: AsyncSession) -> ProjectRow:
+    """Idempotent, unlike the other seeders, because it is the shared root.
+
+    Two seeders now reach it by different paths -- `seed_feature_link` needs both
+    a feature (project -> version -> feature) and an artifact (project -> source
+    -> artifact) -- and inserting twice fails on the primary key. The failure
+    names `projects`, which is nowhere near the table being tested.
+    """
+    existing = await session.get(ProjectRow, "prj_1")
+    if existing is not None:
+        return existing
     return await _add(session, make_project())
 
 
@@ -338,6 +354,37 @@ def make_person() -> PersonRow:
         platform=Platform.GITHUB,
         external_id="MDQ6VXNlcjE=",
         handle="dsokolov",
+    )
+
+
+def make_version() -> VersionRow:
+    return VersionRow(id="ver_1", project_id="prj_1", name="v1")
+
+
+def make_feature() -> FeatureRow:
+    return FeatureRow(id="ftr_1", project_id="prj_1", version_id="ver_1", name="image upload")
+
+
+def make_feature_link() -> FeatureLinkRow:
+    return FeatureLinkRow(
+        feature_id="ftr_1",
+        artifact_id="art_1",
+        method=MembershipMethod.BRANCH,
+        confidence=0.8,
+    )
+
+
+def make_identity() -> IdentityRow:
+    return IdentityRow(id="idn_1", display_name="Dmitri Sokolov")
+
+
+def make_identity_link() -> IdentityLinkRow:
+    return IdentityLinkRow(
+        person_id="per_1",
+        identity_id="idn_1",
+        platform=Platform.GITHUB,
+        method=LinkMethod.CONFIRMED,
+        confidence=1.0,
     )
 
 
@@ -365,6 +412,32 @@ async def seed_person(session: AsyncSession) -> PersonRow:
     return await _add(session, make_person())
 
 
+async def seed_version(session: AsyncSession) -> VersionRow:
+    await seed_project(session)
+    return await _add(session, make_version())
+
+
+async def seed_feature(session: AsyncSession) -> FeatureRow:
+    await seed_version(session)
+    return await _add(session, make_feature())
+
+
+async def seed_feature_link(session: AsyncSession) -> FeatureLinkRow:
+    await seed_feature(session)
+    await seed_artifact(session)
+    return await _add(session, make_feature_link())
+
+
+async def seed_identity(session: AsyncSession) -> IdentityRow:
+    return await _add(session, make_identity())
+
+
+async def seed_identity_link(session: AsyncSession) -> IdentityLinkRow:
+    await seed_person(session)
+    await seed_identity(session)
+    return await _add(session, make_identity_link())
+
+
 async def seed_artifact(session: AsyncSession) -> ArtifactRow:
     await seed_source(session)
     await seed_person(session)
@@ -375,6 +448,11 @@ SEEDERS: dict[str, Callable[[AsyncSession], Awaitable[Any]]] = {
     "projects": seed_project,
     "sources": seed_source,
     "people": seed_person,
+    "identities": seed_identity,
+    "identity_links": seed_identity_link,
+    "versions": seed_version,
+    "features": seed_feature,
+    "feature_links": seed_feature_link,
     "artifacts": seed_artifact,
     "signals": seed_signal,
     "connector_accounts": seed_connector_account,
@@ -392,6 +470,11 @@ MODELS: dict[str, type[Any]] = {
     "projects": ProjectRow,
     "sources": SourceRow,
     "people": PersonRow,
+    "identities": IdentityRow,
+    "identity_links": IdentityLinkRow,
+    "versions": VersionRow,
+    "features": FeatureRow,
+    "feature_links": FeatureLinkRow,
     "artifacts": ArtifactRow,
     "signals": SignalRow,
     "connector_accounts": ConnectorAccountRow,
@@ -437,6 +520,32 @@ async def reload[T: Base](session: AsyncSession, model: type[T], pk: str) -> T:
     """
     session.expunge_all()
     return (await session.execute(select(model).where(model.id == pk))).scalar_one()
+
+
+async def reload_row[T: Base](session: AsyncSession, row: T) -> T:
+    """`reload`, for a row whose key is not a single column called `id`."""
+    model = type(row)
+    clause = _pk_filter(model, row)
+    session.expunge_all()
+    return (await session.execute(select(model).where(clause))).scalar_one()
+
+
+def _pk_filter(model: type[Base], row: Base) -> Any:
+    """A WHERE clause selecting exactly `row`, whatever its key looks like.
+
+    Most tables here key on a column called `id`, and this used to assume both --
+    the name and that there was only one. `identity_links` keys on `person_id`,
+    and `feature_links` on the *pair* `(feature_id, artifact_id)`, both
+    deliberately: an account belongs to one human, while an artifact genuinely
+    belongs to several features. Reading the key off the mapper means a table with
+    a natural or composite key needs no special case here.
+    """
+    return and_(
+        *(
+            getattr(model, column.name) == getattr(row, column.name)
+            for column in inspect(model).primary_key
+        )
+    )
 
 
 async def count(session: AsyncSession, model: type[Any]) -> int:
@@ -666,6 +775,10 @@ class TestEnumColumns:
             ("connector_accounts", "auth_type"),
             ("connector_accounts", "platform"),
             ("connector_accounts", "status"),
+            ("feature_links", "method"),
+            ("features", "state"),
+            ("identity_links", "method"),
+            ("identity_links", "platform"),
             ("investigation_steps", "agent"),
             ("investigation_steps", "status"),
             ("investigations", "status"),
@@ -676,6 +789,8 @@ class TestEnumColumns:
             ("signals", "source"),
             ("signals", "status"),
             ("sources", "platform"),
+            ("sources", "watch_status"),
+            ("versions", "state"),
         ]
 
     def test_stored_as_plain_varchar_without_a_constraint(self) -> None:
@@ -707,7 +822,7 @@ class TestEnumColumns:
         `is Platform.REDDIT` and `.is_retrievable` on these.
         """
         row = await SEEDERS[table_name](db_session)
-        reloaded = await reload(db_session, MODELS[table_name], row.id)
+        reloaded = await reload_row(db_session, row)
         value = getattr(reloaded, column_name)
 
         assert isinstance(value, enum_class_of(table_name, column_name))
@@ -735,11 +850,11 @@ class TestEnumColumns:
         await db_session.commit()
 
         if "UNKNOWN" in enum_cls.__members__:
-            reloaded = await reload(db_session, MODELS[table_name], row.id)
+            reloaded = await reload_row(db_session, row)
             assert getattr(reloaded, column_name) is enum_cls.UNKNOWN
         else:
             with pytest.raises(ValueError, match="is not a valid"):
-                await reload(db_session, MODELS[table_name], row.id)
+                await reload_row(db_session, row)
 
     def test_signal_status_is_the_closed_one(self) -> None:
         """Guards the branch above: if `SignalStatus` ever gains `UNKNOWN`, the
@@ -1115,6 +1230,11 @@ class TestUniqueConstraints:
             "uq_sources_platform_external_id",
             "uq_people_platform_external_id",
             "uq_projects_tenant_id_slug",
+            # A project may not hold two versions called `v1`, nor two features
+            # called `image upload` -- both would make the deterministic id
+            # collide with a row that is not the same thing.
+            "uq_versions_project_id_name",
+            "uq_features_project_id_name",
             "uq_connector_cursors_connector_slug_account_id_params_hash",
             "uq_investigation_steps_investigation_id_sequence",
             "uq_reports_investigation_id_version",
@@ -1130,6 +1250,22 @@ class TestUniqueConstraints:
 
 
 EXPECTED_ON_DELETE: dict[str, str] = {
+    # A link asserts that an account belongs to a human. Delete either end and
+    # the assertion is about something that no longer exists, so it goes too --
+    # unlike an artifact, a link holds no history of its own to protect.
+    "fk_identity_links_identity_id_identities": "CASCADE",
+    "fk_identity_links_person_id_people": "CASCADE",
+    # A membership claim says an artifact is part of a feature. Delete either and
+    # the claim is about something that no longer exists.
+    "fk_feature_links_feature_id_features": "CASCADE",
+    "fk_feature_links_artifact_id_artifacts": "CASCADE",
+    # Cancelling a release does not mean the work never happened, so the features
+    # survive and simply stop belonging to a version.
+    "fk_features_version_id_versions": "SET NULL",
+    # Same reasoning as artifacts and their source: deleting a project that still
+    # holds work is a decision to be made explicitly, not a side effect.
+    "fk_features_project_id_projects": "RESTRICT",
+    "fk_versions_project_id_projects": "RESTRICT",
     # A cursor is derived state; without its account there is nothing to resume.
     "fk_connector_cursors_account_id_connector_accounts": "CASCADE",
     # Deleting a report must not erase the record that the run happened.

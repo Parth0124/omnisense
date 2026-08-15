@@ -88,6 +88,7 @@ __all__ = [
     "PullRequestDetails",
     "ReviewDetails",
     "Source",
+    "WatchStatus",
     "artifact_id",
     "person_id",
     "source_id",
@@ -250,6 +251,39 @@ def person_id(platform: Platform | str, external_id: str) -> str:
 # --------------------------------------------------------------------------- #
 
 
+class WatchStatus(enum.StrEnum):
+    """Whether we sync this source, and whether we are still asking.
+
+    Discovery finds far more than anybody wants ingested -- a fork of a tutorial,
+    a repository somebody was added to once, `#random`. So a found source lands
+    as `PENDING` and stays inert until a person says otherwise. Nothing is read
+    from a source nobody has approved.
+
+    A plain `StrEnum`, not a tolerant one: this value decides whether we make
+    network calls against somebody's account, and a member that degraded to
+    `UNKNOWN` would have to be treated as one or the other with no way to know
+    which. Failing loudly on an unrecognised value is the only safe reading.
+    """
+
+    PENDING = "pending"
+    """Found, not yet decided. Never synced."""
+
+    INCLUDED = "included"
+    """Synced."""
+
+    EXCLUDED = "excluded"
+    """Never synced, and never proposed again.
+
+    Stored rather than deleted, for the reason every rejection in this system is
+    stored: the next discovery run would find it again, and a person who has to
+    reject the same forked tutorial every week stops reviewing the list at all.
+    """
+
+    @property
+    def is_decided(self) -> bool:
+        return self is not WatchStatus.PENDING
+
+
 class Source(StrictModel):
     """Where artifacts come from: a repository, a channel, a space, a feed.
 
@@ -273,6 +307,14 @@ class Source(StrictModel):
         default=None, description="Repositories only; `None` everywhere else."
     )
     is_active: bool = True
+    watch_status: WatchStatus = WatchStatus.INCLUDED
+    """Defaults to `INCLUDED` because a source constructed by hand was chosen.
+
+    Only discovery creates `PENDING` rows -- somebody who typed `add-repo
+    owner/name` has already made the decision the review queue exists to collect,
+    and asking them to confirm it again would be a worse interface, not a safer
+    one.
+    """
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
